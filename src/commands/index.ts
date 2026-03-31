@@ -10,7 +10,7 @@ export interface CommandResult {
 
 const COMMANDS = [
   { name: 'help', aliases: ['h', '?'], desc: '显示帮助',
-    exec: () => ({ type: 'info', content: `🦞 edgecli 命令：
+    exec: () => ({ type: 'info', content: `edgecli 命令：
   /help (?/ h/)     显示帮助
   /clear            清除对话历史
   /compact          压缩上下文（TODO）

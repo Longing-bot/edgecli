@@ -1,4 +1,4 @@
-# 🦞 edgecli
+# edgecli
 
 AI coding assistant for the terminal. Architecture from Claude Code. Model-agnostic by design.
 

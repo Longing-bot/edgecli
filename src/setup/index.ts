@@ -26,7 +26,7 @@ async function selectItem(rl: ReturnType<typeof createInterface>, items: string[
   function render() {
     // 清屏 + 重绘
     process.stdout.write('\x1b[2J\x1b[H')
-    console.log(`🦞 ${title}\n`)
+    console.log(`${title}\n`)
     items.forEach((item, i) => {
       const prefix = i === cursor ? '  ▸ ' : '    '
       const marker = i === cursor ? '●' : ' '
@@ -82,7 +82,7 @@ export async function ensureConfig(): Promise<CodoConfig> {
 
   const rl = createInterface({ input: process.stdin, output: process.stdout })
 
-  console.log('\n🦞 欢迎使用 edgecli！还没有配置 API。\n')
+  console.log('\n欢迎使用 edgecli！还没有配置 API。\n')
 
   // 选择提供商
   const providerNames = PROVIDERS.map(p => p.name)

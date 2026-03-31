@@ -61,7 +61,7 @@ export const App: React.FC<Props> = ({ initialPrompt }) => {
   return (
     <Box flexDirection="column">
       <Box marginBottom={1}>
-        <Text bold color="cyan">{'🦞 edgecli '}</Text>
+        <Text bold color="cyan">{'edgecli '}</Text>
         <Text dimColor>[{config.model}] </Text>
         {msgs.length > 0 && <Text dimColor>({getContextStats(msgs)})</Text>}
       </Box>
