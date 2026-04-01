@@ -21,7 +21,7 @@ function isRetryable(err: any): boolean {
 
 // ─── Anthropic 格式（SDK）─────────────────────────────────────────────
 async function callAnthropic(
-  messages: Message[], tools: any[], config: CodoConfig, stream?: StreamCallbacks
+  messages: Message[], tools: any[], config: CodoConfig, stream?: StreamCallbacks, thinking?: boolean
 ): Promise<LLMResponse> {
   const key = getApiKey(config)
   if (!key) throw new Error('未配置 API Key')
@@ -65,6 +65,7 @@ async function callAnthropic(
         const response = await client.messages.create({
           model: config.model, max_tokens: config.maxTokens, system, messages: chat,
           tools: toolDefs,
+          ...(thinking ? { thinking: { type: 'enabled', budget_tokens: 10000 } } : {}),
           stream: true,
         })
 
@@ -95,6 +96,7 @@ async function callAnthropic(
       const msg = await client.messages.create({
         model: config.model, max_tokens: config.maxTokens, system, messages: chat,
         tools: toolDefs,
+        ...(thinking ? { thinking: { type: 'enabled', budget_tokens: 10000 } } : {}),
       })
       let content = ''
       const toolCalls: ToolCall[] = []

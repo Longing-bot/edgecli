@@ -37,6 +37,9 @@ const help: Command = {
   /compact           压缩上下文，保留摘要
   /history           查看消息统计
   /config            查看当前配置
+  /model             切换/查看模型
+  /think             切换深度思考模式
+  /resume            恢复上次对话
   /quit (q/ exit/)   退出`,
   }),
 }
@@ -150,7 +153,7 @@ const quit: Command = {
 }
 
 // ─── 注册表 ────────────────────────────────────────────────────────────
-const COMMANDS: Command[] = [help, clear, compact, history, config, model, resume, quit]
+const COMMANDS: Command[] = [help, clear, compact, history, config, model, think, resume, quit]
 
 export function processCommand(input: string, context: CommandContext): CommandResult | Promise<CommandResult> | null {
   if (!input.startsWith('/')) return null
