@@ -15,7 +15,7 @@ if (args.includes('--help') || args.includes('-h')) {
 
 用法: edgecli [提问] | edgecli --print [提问] | edgecli --config | edgecli --setup | edgecli --help
 选项: -m/--model 模型名 | --provider openai|anthropic|openrouter
-命令: /help /clear /compact /history /quit
+命令: /help /clear /compact /history /config /model /think /policy /agent /dream /resume /quit
 环境变量: OPENROUTER_API_KEY | OPENAI_API_KEY | ANTHROPIC_API_KEY`)
   process.exit(0)
 }
