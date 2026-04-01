@@ -8,6 +8,7 @@
 
 import { getEnvInfo, loadMemory } from '../config/index.js'
 import { loadMemoryFiles } from '../memory/filesystem.js'
+import { loadAllSkills, buildSkillsPrompt } from '../skills/index.js'
 
 export function buildSystemPrompt(): string {
   const env = getEnvInfo()
@@ -16,6 +17,7 @@ export function buildSystemPrompt(): string {
   return `You are edgecli, an interactive CLI agent for software engineering tasks.
 
 ${loadMemoryFiles() ? `# Memory Files\n${loadMemoryFiles()}\n` : ''}
+${buildSkillsPrompt(loadAllSkills(['skills', '.edgecli/skills']))}
 # CRITICAL RULES
 
 ## What NOT to do (anti-patterns are more effective than positive instructions):

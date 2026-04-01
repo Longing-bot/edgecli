@@ -40,6 +40,8 @@ const help: Command = {
   /config            查看当前配置
   /model             切换/查看模型
   /think             切换深度思考模式
+  /policy            查看/切换执行策略
+  /agent             运行子代理执行任务
   /resume            恢复上次对话
   /quit (q/ exit/)   退出`,
   }),
@@ -135,25 +137,6 @@ const think: Command = {
   },
 }
 
-// ─── /resume（CC 风格：恢复上次对话）─────────────────────────────────────
-const resume: Command = {
-  name: 'resume',
-  description: '恢复上次对话',
-  aliases: ['continue'],
-  execute: (_, ctx) => {
-    const msgs = loadSession()
-    if (msgs.length === 0) {
-      return { type: 'info', content: '没有可恢复的对话。' }
-    }
-    const userMsgs = msgs.filter(m => m.role === 'user')
-    const lastUser = userMsgs[userMsgs.length - 1]
-    return {
-      type: 'info',
-      content: `已恢复 ${msgs.length} 条消息的对话。\n上次用户消息: ${lastUser?.content?.slice(0, 80) || '(无)'}`,
-    }
-  },
-}
-
 // ─── /policy（Codex 风格：执行策略）─────────────────────────────────────
 const policy: Command = {
   name: 'policy',
@@ -173,6 +156,49 @@ const policy: Command = {
   },
 }
 
+// ─── /agent（OpenClaw 风格：子代理）─────────────────────────────────────
+const agent: Command = {
+  name: 'agent',
+  description: '运行子代理执行任务',
+  aliases: [],
+  argumentHint: '<任务描述>',
+  execute: (args) => {
+    if (!args) {
+      return { type: 'info', content: '用法: /agent <任务描述>\n\n子代理会在独立上下文中执行任务，完成后返回结果。' }
+    }
+    return { type: 'info', content: `🤖 子代理任务: ${args}\n（子代理功能正在集成中）` }
+  },
+}
+
+// ─── /resume（CC 风格：恢复上次对话）─────────────────────────────────────
+const resume: Command = {
+  name: 'resume',
+  description: '恢复上次对话',
+  aliases: ['continue'],
+  execute: (_, ctx) => {
+    const msgs = loadSession()
+    if (msgs.length === 0) {
+      return { type: 'info', content: '没有可恢复的对话。' }
+    }
+    const userMsgs = msgs.filter(m => m.role === 'user')
+    const lastUser = userMsgs[userMsgs.length - 1]
+    return {
+      type: 'info',
+      content: `已恢复 ${msgs.length} 条消息的对话。\n上次用户消息: ${lastUser?.content?.slice(0, 80) || '(无)'}`,
+    }
+  },
+}
+
+// ─── /quit ─────────────────────────────────────────────────────────────
+const quit: Command = {
+  name: 'quit',
+  description: '退出',
+  aliases: ['q', 'exit'],
+  execute: () => { process.exit(0); return { type: 'info', content: '' } },
+}
+
+// ─── 注册表 ────────────────────────────────────────────────────────────
+const COMMANDS: Command[] = [help, clear, compact, history, config, model, think, policy, agent, resume, quit]
 
 export function processCommand(input: string, context: CommandContext): CommandResult | Promise<CommandResult> | null {
   if (!input.startsWith('/')) return null

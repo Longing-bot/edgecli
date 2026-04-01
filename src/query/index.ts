@@ -5,6 +5,7 @@ import { findTool, toOpenAI, toAnthropic, ToolResult } from '../tools/index.js'
 import { buildSystemPrompt } from '../prompts/system.js'
 import { executePreToolHooks, executePostToolHooks } from '../hooks/index.js'
 import { createBudgetTracker, checkBudget } from '../memory/index.js'
+import { shouldFlushMemory, buildFlushMessages } from '../memory/flush.js'
 
 const MAX_TURNS = 80
 
@@ -43,6 +44,18 @@ export async function runQuery(
       onError?.('上下文已满。请使用 /clear 清除历史或 /compact 压缩。')
       break
     }
+
+    // OpenClaw 风格：压缩前自动记忆刷新
+    if (shouldFlushMemory(messages)) {
+      const flushMsgs = buildFlushMessages()
+      // 将刷新消息注入到当前对话（模型会自动保存记忆）
+      for (const m of flushMsgs) {
+        if (!messages.some(existing => existing.content === m.content)) {
+          messages.push(m)
+        }
+      }
+    }
+
     // 如果需要 continue 提示，加入系统消息
     if (decision.nudgeMessage && !messages.some(m => m.content === decision.nudgeMessage)) {
       messages.push({ role: 'user', content: decision.nudgeMessage })
