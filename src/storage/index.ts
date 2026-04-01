@@ -64,9 +64,18 @@ function initTables() {
       FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS session_tags (
+      session_id TEXT NOT NULL,
+      tag TEXT NOT NULL,
+      PRIMARY KEY (session_id, tag),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
     CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
     CREATE INDEX IF NOT EXISTS idx_file_changes_session ON file_changes(session_id);
+    CREATE INDEX IF NOT EXISTS idx_session_tags_tag ON session_tags(tag);
+    CREATE INDEX IF NOT EXISTS idx_session_tags_session ON session_tags(session_id);
   `)
 }
 
@@ -118,6 +127,158 @@ export function deleteSession(sessionId: string) {
   database.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId)
 }
 
+// ─── 会话搜索 ──────────────────────────────────────────────────────
+export function searchSessions(keyword: string): SearchResult[] {
+  const database = getDb()
+  if (!database) return []
+
+  const pattern = `%${keyword}%`
+  const rows = database.prepare(`
+    SELECT s.*, COUNT(m.id) as match_count
+    FROM sessions s
+    LEFT JOIN messages m ON m.session_id = s.id AND m.content LIKE ?
+    WHERE s.title LIKE ? OR s.workspace LIKE ? OR m.id IS NOT NULL
+    GROUP BY s.id
+    ORDER BY match_count DESC, s.updated_at DESC
+    LIMIT 50
+  `).all(pattern, pattern, pattern) as (SessionRecord & { match_count: number })[]
+
+  return rows.map(r => ({ ...r, match_count: r.match_count || 0 }))
+}
+
+// ─── 会话导出 ──────────────────────────────────────────────────────
+export function exportSession(sessionId: string): string | null {
+  const database = getDb()
+  if (!database) return null
+
+  const session = getSession(sessionId)
+  if (!session) return null
+
+  const messages = getMessages(sessionId)
+  const tags = getSessionTags(sessionId)
+  const changes = getFileChanges(sessionId)
+
+  const lines: string[] = [
+    `# Session: ${session.id}`,
+    '',
+    `- **Created:** ${session.created_at}`,
+    `- **Updated:** ${session.updated_at}`,
+    `- **Model:** ${session.model || '(default)'}`,
+    `- **Workspace:** ${session.workspace}`,
+    tags.length ? `- **Tags:** ${tags.join(', ')}` : '',
+    '',
+    '## Messages',
+    '',
+  ].filter(Boolean)
+
+  for (const msg of messages) {
+    const role = msg.role === 'user' ? '👤 User' :
+                 msg.role === 'assistant' ? '🤖 Assistant' :
+                 msg.role === 'tool' ? '🔧 Tool' : '⚙️ System'
+    lines.push(`### ${role}`)
+    lines.push('')
+    lines.push(msg.content || '*(empty)*')
+    lines.push('')
+
+    if (msg.tool_calls?.length) {
+      lines.push('**Tool calls:**')
+      for (const tc of msg.tool_calls) {
+        lines.push(`- \`${tc.function.name}\`: ${tc.function.arguments}`)
+      }
+      lines.push('')
+    }
+  }
+
+  if (changes.length > 0) {
+    lines.push('## File Changes', '')
+    for (const change of changes) {
+      lines.push(`### ${change.file_path}`)
+      if (change.diff) {
+        lines.push('```diff')
+        lines.push(change.diff)
+        lines.push('```')
+      }
+      lines.push('')
+    }
+  }
+
+  const md = lines.join('\n')
+  const exportPath = join(DIR, 'exports', `${sessionId}.md`)
+  mkdirSync(join(DIR, 'exports'), { recursive: true })
+  writeFileSync(exportPath, md)
+
+  return exportPath
+}
+
+// ─── 会话标签 ──────────────────────────────────────────────────────
+export function setSessionTags(sessionId: string, tags: string[]) {
+  const database = getDb()
+  if (!database) return
+
+  // 先删除旧标签
+  database.prepare('DELETE FROM session_tags WHERE session_id = ?').run(sessionId)
+
+  // 插入新标签
+  const stmt = database.prepare('INSERT OR IGNORE INTO session_tags (session_id, tag) VALUES (?, ?)')
+  const transaction = database.transaction((sid: string, tg: string[]) => {
+    for (const tag of tg) {
+      stmt.run(sid, tag)
+    }
+  })
+  transaction(sessionId, tags)
+}
+
+export function getSessionTags(sessionId: string): string[] {
+  const database = getDb()
+  if (!database) return []
+
+  const rows = database.prepare('SELECT tag FROM session_tags WHERE session_id = ?').all(sessionId) as { tag: string }[]
+  return rows.map(r => r.tag)
+}
+
+export function listAllTags(): string[] {
+  const database = getDb()
+  if (!database) return []
+
+  const rows = database.prepare('SELECT DISTINCT tag FROM session_tags ORDER BY tag').all() as { tag: string }[]
+  return rows.map(r => r.tag)
+}
+
+export function getSessionsByTag(tag: string): SessionRecord[] {
+  const database = getDb()
+  if (!database) return []
+
+  return database.prepare(`
+    SELECT s.* FROM sessions s
+    JOIN session_tags st ON st.session_id = s.id
+    WHERE st.tag = ?
+    ORDER BY s.updated_at DESC
+  `).all(tag) as SessionRecord[]
+}
+
+// ─── 会话清理 ──────────────────────────────────────────────────────
+export function cleanupSessions(keep: number = 50): number {
+  const database = getDb()
+  if (!database) return 0
+
+  // 找出需要删除的旧会话
+  const old = database.prepare(`
+    SELECT id FROM sessions ORDER BY updated_at DESC LIMIT -1 OFFSET ?
+  `).all(keep) as { id: string }[]
+
+  if (old.length === 0) return 0
+
+  const ids = old.map(r => r.id)
+  const transaction = database.transaction((sessionIds: string[]) => {
+    for (const id of sessionIds) {
+      database!.prepare('DELETE FROM sessions WHERE id = ?').run(id)
+    }
+  })
+  transaction(ids)
+
+  return old.length
+}
+
 // ─── Message CRUD ───────────────────────────────────────────────────
 export function addMessage(sessionId: string, msg: Message): number | null {
   const database = getDb()
@@ -133,9 +294,7 @@ export function addMessage(sessionId: string, msg: Message): number | null {
     msg.usage ? JSON.stringify(msg.usage) : null
   )
 
-  // 更新 session 的 updated_at
   updateSession(sessionId, {})
-
   return result.lastInsertRowid as number
 }
 
@@ -157,9 +316,6 @@ export function getMessages(sessionId: string, limit = 200): Message[] {
     }
     if (row.usage) {
       try { msg.usage = JSON.parse(row.usage) } catch {}
-    }
-    if (msg.role === 'tool' && row.content) {
-      // 尝试恢复 tool_call_id（从 tool_calls 中匹配）
     }
     return msg
   })
@@ -256,34 +412,28 @@ export function saveSessionToJSON(msgs: Message[]) {
 
 // ─── 统一接口：优先 SQLite，fallback JSON ───────────────────────────
 export function loadSession(sessionId?: string): Message[] {
-  // 尝试 SQLite
   if (sessionId) {
     const msgs = getMessages(sessionId)
     if (msgs.length > 0) return msgs
   }
 
-  // 使用 workspace session
   const wsId = getWorkspaceSessionId()
   const msgs = getMessages(wsId)
   if (msgs.length > 0) return msgs
 
-  // Fallback to JSON
   return loadSessionFromJSON()
 }
 
 export function saveSession(sessionId: string | undefined, msgs: Message[]) {
   const sid = sessionId || getWorkspaceSessionId()
 
-  // 确保 session 存在
   if (!getSession(sid)) {
     createSession({ workspace: process.cwd(), id: sid } as any)
   }
 
-  // SQLite：先清空再重新插入
   clearMessages(sid)
   addMessages(sid, msgs.slice(-40))
 
-  // 同时保存 JSON（备份兼容）
   saveSessionToJSON(msgs)
 }
 
@@ -323,6 +473,10 @@ export interface FileChangeRecord {
   after_hash: string | null
   diff: string | null
   created_at: string
+}
+
+export interface SearchResult extends SessionRecord {
+  match_count: number
 }
 
 export function isSQLiteAvailable(): boolean {

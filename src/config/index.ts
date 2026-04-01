@@ -7,7 +7,10 @@ import { homedir } from 'os'
 import { createHash } from 'crypto'
 import { execSync } from 'child_process'
 
+export const CONFIG_VERSION = 2
+
 export interface CodoConfig {
+  version?: number
   apiKey: string
   baseUrl: string
   model: string
@@ -79,9 +82,12 @@ export class UsageTracker {
   getSummary(model: string): string {
     const turnCost = estimateCost(this._currentTurn, model)
     const totalCost = estimateCost(this._total, model)
+    const cacheHitRate = this._total.input_tokens > 0
+      ? Math.round((this._total.cache_read_input_tokens / (this._total.input_tokens + this._total.cache_creation_input_tokens + this._total.cache_read_input_tokens)) * 100)
+      : 0
     const lines = [
       `📊 本轮: ${this._currentTurn.input_tokens}→${this._currentTurn.output_tokens} tok  缓存读:${this._currentTurn.cache_read_input_tokens}  ${formatUsd(turnCost)}`,
-      `📊 累计: ${this._total.input_tokens}→${this._total.output_tokens} tok (${this._turnCount} 轮)  ${formatUsd(totalCost)}`,
+      `📊 累计: ${this._total.input_tokens}→${this._total.output_tokens} tok (${this._turnCount} 轮)  缓存命中率:${cacheHitRate}%  ${formatUsd(totalCost)}`,
     ]
     return lines.join('\n')
   }
@@ -100,7 +106,7 @@ export interface Message {
   content: string
   tool_calls?: ToolCall[]
   tool_call_id?: string
-  usage?: TokenUsage  // 可选的 token 用量字段
+  usage?: TokenUsage
 }
 
 export interface ToolCall {
@@ -111,28 +117,104 @@ export interface ToolCall {
 
 const DIR = join(homedir(), '.edgecli')
 const CONFIG_FILE = join(DIR, 'config.json')
+const PROJECT_CONFIG_FILE = '.edgeclirc'
 const HISTORY_DIR = join(DIR, 'history')
 const MEMORY_FILES = ['EDGECLI.md', 'AGENTS.md', '.edgecli.md', 'OpenCode.md']
 
 const DEFAULT: CodoConfig = {
+  version: CONFIG_VERSION,
   apiKey: '', baseUrl: 'https://api.longcat.chat/anthropic',
   model: 'LongCat-Flash-Thinking-2601', maxTokens: 8192,
   provider: 'anthropic', autoApprove: false,
 }
 
+// ─── 配置版本迁移 ────────────────────────────────────────────────────
+function migrateConfig(raw: any): CodoConfig {
+  let config = { ...DEFAULT, ...raw }
+
+  // v1 → v2: 无破坏性变更，主要是添加 version 字段
+  if (!config.version || config.version < CONFIG_VERSION) {
+    config.version = CONFIG_VERSION
+    // 未来迁移逻辑放在这里
+  }
+
+  return config
+}
+
+// ─── 配置验证 ────────────────────────────────────────────────────────
+export interface ConfigWarning {
+  field: string
+  message: string
+  fix?: string
+}
+
+export function validateConfig(config: CodoConfig): ConfigWarning[] {
+  const warnings: ConfigWarning[] = []
+
+  if (!config.baseUrl) {
+    warnings.push({ field: 'baseUrl', message: 'API 地址为空', fix: '设置 baseUrl，例如 https://api.openai.com/v1' })
+  }
+
+  if (!config.model) {
+    warnings.push({ field: 'model', message: '模型名称为空', fix: '设置 model，例如 gpt-4o 或 claude-sonnet-4-20250514' })
+  }
+
+  if (!config.apiKey && !process.env.OPENROUTER_API_KEY && !process.env.OPENAI_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+    warnings.push({
+      field: 'apiKey',
+      message: '未配置 API Key（配置文件和环境变量中都没有）',
+      fix: '设置 apiKey 或导出环境变量 OPENAI_API_KEY / ANTHROPIC_API_KEY',
+    })
+  }
+
+  if (config.maxTokens < 100) {
+    warnings.push({ field: 'maxTokens', message: `maxTokens=${config.maxTokens} 过小`, fix: '建议至少 4096' })
+  }
+  if (config.maxTokens > 200000) {
+    warnings.push({ field: 'maxTokens', message: `maxTokens=${config.maxTokens} 可能超出模型限制`, fix: '确认模型是否支持此 token 上限' })
+  }
+
+  const validProviders = ['openai', 'anthropic', 'openrouter']
+  if (config.provider && !validProviders.includes(config.provider)) {
+    warnings.push({ field: 'provider', message: `未知 provider: ${config.provider}`, fix: `可选: ${validProviders.join(', ')}` })
+  }
+
+  return warnings
+}
+
+// ─── 配置加载（支持 .edgeclirc 项目级覆盖）───────────────────────────
 export function loadConfig(): CodoConfig {
   mkdirSync(DIR, { recursive: true })
+
+  // 1. 加载全局配置
+  let globalConfig: any = {}
   if (existsSync(CONFIG_FILE)) {
     try {
-      const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
-      return { ...DEFAULT, ...raw }
-    } catch (_e) {
-      // ignore parse errors
-    }
+      globalConfig = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
+    } catch {}
   }
-  return { ...DEFAULT }
+
+  // 2. 加载项目级配置（.edgeclirc），覆盖全局
+  const projectConfigPath = join(process.cwd(), PROJECT_CONFIG_FILE)
+  let projectConfig: any = {}
+  if (existsSync(projectConfigPath)) {
+    try {
+      projectConfig = JSON.parse(readFileSync(projectConfigPath, 'utf-8'))
+    } catch {}
+  }
+
+  // 3. 合并并迁移
+  const merged = migrateConfig({ ...globalConfig, ...projectConfig })
+
+  return merged
 }
-export function saveConfig(c: CodoConfig) { mkdirSync(DIR, { recursive: true }); writeFileSync(CONFIG_FILE, JSON.stringify(c, null, 2)) }
+
+export function saveConfig(c: CodoConfig) {
+  mkdirSync(DIR, { recursive: true })
+  c.version = CONFIG_VERSION
+  writeFileSync(CONFIG_FILE, JSON.stringify(c, null, 2))
+}
+
 export function getApiKey(c: CodoConfig): string {
   return c.apiKey || process.env.OPENROUTER_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || ''
 }
@@ -143,6 +225,28 @@ export function detectProvider(c: CodoConfig): string {
   if (c.provider) return c.provider
   if (c.baseUrl.endsWith('/v1') || c.baseUrl.includes('/v1/')) return 'openai'
   return 'anthropic'
+}
+
+// ─── 配置模板（edgecli init）─────────────────────────────────────────
+export function generateDefaultConfig(): string {
+  const configPath = join(process.cwd(), PROJECT_CONFIG_FILE)
+
+  if (existsSync(configPath)) {
+    return configPath // 已存在则直接返回
+  }
+
+  const template: CodoConfig = {
+    version: CONFIG_VERSION,
+    apiKey: '',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-4o',
+    maxTokens: 8192,
+    provider: 'openai',
+    autoApprove: false,
+  }
+
+  writeFileSync(configPath, JSON.stringify(template, null, 2))
+  return configPath
 }
 
 // ─── Environment (CC pattern) ─────────────────────────────────────────
@@ -204,11 +308,9 @@ export function getSessionFile(): string {
 // 向后兼容：优先从 SQLite 加载，fallback JSON
 export function loadSession(): Message[] {
   try {
-    // 使用动态 import 代替 require（ESM 兼容）
     const storageModule = require('../storage/index.js') as { loadSession: (id?: string) => Message[] }
     return storageModule.loadSession()
   } catch {
-    // fallback 到旧版 JSON
     const f = getSessionFile()
     if (existsSync(f)) {
       try {
@@ -229,7 +331,6 @@ export function saveSession(msgs: Message[]) {
     const storageModule = require('../storage/index.js') as { saveSession: (id: string | undefined, msgs: Message[]) => void }
     storageModule.saveSession(undefined, msgs)
   } catch {
-    // fallback 到旧版 JSON
     const data: SessionData = { version: SESSION_VERSION, messages: msgs.slice(-40) }
     mkdirSync(HISTORY_DIR, { recursive: true })
     writeFileSync(getSessionFile(), JSON.stringify(data, null, 2))

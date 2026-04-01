@@ -21,7 +21,7 @@ function isRetryable(err: any): boolean {
 
 // ─── Anthropic 格式（SDK）─────────────────────────────────────────────
 async function callAnthropic(
-  messages: Message[], tools: any[], config: CodoConfig, stream?: StreamCallbacks, thinking?: boolean
+  messages: Message[], tools: any[], config: CodoConfig, stream?: StreamCallbacks, thinking?: boolean, signal?: AbortSignal
 ): Promise<LLMResponse> {
   const key = getApiKey(config)
   if (!key) throw new Error('未配置 API Key')
@@ -55,12 +55,13 @@ async function callAnthropic(
     chat.push(m)
   }
 
-  // tools 已经是 Anthropic 格式：{ name, description, input_schema }
   const toolDefs = tools?.length ? tools as any[] : undefined
 
   // 带重试的流式调用
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+
       if (stream) {
         const response = await client.messages.create({
           model: config.model, max_tokens: config.maxTokens, system, messages: chat,
@@ -75,6 +76,8 @@ async function callAnthropic(
         let usage: TokenUsage | undefined
 
         for await (const event of response) {
+          if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+
           if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
             content += event.delta.text
             stream.onToken(event.delta.text)
@@ -91,7 +94,12 @@ async function callAnthropic(
           }
           if (event.type === 'message_delta' && (event as any).usage) {
             const u = (event as any).usage
-            usage = { input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0, cache_creation_input_tokens: u.cache_creation_input_tokens || 0, cache_read_input_tokens: u.cache_read_input_tokens || 0 }
+            usage = {
+              input_tokens: u.input_tokens || 0,
+              output_tokens: u.output_tokens || 0,
+              cache_creation_input_tokens: u.cache_creation_input_tokens || 0,
+              cache_read_input_tokens: u.cache_read_input_tokens || 0,
+            }
           }
         }
         return { content, toolCalls, usage }
@@ -118,6 +126,7 @@ async function callAnthropic(
       return { content, toolCalls, usage }
 
     } catch (ex: any) {
+      if (ex.name === 'AbortError' || signal?.aborted) throw new Error('请求已取消')
       if (isRetryable(ex) && attempt < MAX_RETRIES) {
         const delay = 1000 * Math.pow(2, attempt) + Math.random() * 500
         const waitSec = Math.round(delay / 1000)
@@ -133,7 +142,7 @@ async function callAnthropic(
 
 // ─── OpenAI 格式（SDK）─────────────────────────────────────────────────
 async function callOpenAI(
-  messages: Message[], tools: any[], config: CodoConfig, stream?: StreamCallbacks
+  messages: Message[], tools: any[], config: CodoConfig, stream?: StreamCallbacks, signal?: AbortSignal
 ): Promise<LLMResponse> {
   const key = getApiKey(config)
   if (!key) throw new Error('未配置 API Key')
@@ -145,6 +154,8 @@ async function callOpenAI(
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+
       if (stream) {
         const response = await client.chat.completions.create({
           model: config.model, messages: messages as any, tools, max_tokens: config.maxTokens,
@@ -156,6 +167,8 @@ async function callOpenAI(
         let usage: TokenUsage | undefined
 
         for await (const chunk of response) {
+          if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+
           const delta = chunk.choices?.[0]?.delta
           if (delta?.content) {
             content += delta.content
@@ -172,7 +185,12 @@ async function callOpenAI(
           }
           if ((chunk as any).usage) {
             const u = (chunk as any).usage
-            usage = { input_tokens: u.prompt_tokens || 0, output_tokens: u.completion_tokens || 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+            usage = {
+              input_tokens: u.prompt_tokens || 0,
+              output_tokens: u.completion_tokens || 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            }
           }
         }
         return { content, toolCalls: Object.values(toolCallMap), usage }
@@ -194,6 +212,7 @@ async function callOpenAI(
       })) ?? [], usage }
 
     } catch (ex: any) {
+      if (ex.name === 'AbortError' || signal?.aborted) throw new Error('请求已取消')
       if (isRetryable(ex) && attempt < MAX_RETRIES) {
         const delay = 1000 * Math.pow(2, attempt) + Math.random() * 500
         process.stderr.write(`\n⏳ API ${ex.status}，${Math.round(delay/1000)}秒后重试（${attempt + 1}/${MAX_RETRIES}）\n`)
@@ -208,9 +227,9 @@ async function callOpenAI(
 
 // ─── 统一入口 ──────────────────────────────────────────────────────────
 export async function callLLM(
-  messages: Message[], tools: any[], config: CodoConfig, stream?: StreamCallbacks
+  messages: Message[], tools: any[], config: CodoConfig, stream?: StreamCallbacks, signal?: AbortSignal
 ): Promise<LLMResponse> {
   return detectProvider(config) === 'anthropic'
-    ? callAnthropic(messages, tools, config, stream)
-    : callOpenAI(messages, tools, config, stream)
+    ? callAnthropic(messages, tools, config, stream, false, signal)
+    : callOpenAI(messages, tools, config, stream, signal)
 }

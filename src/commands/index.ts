@@ -51,6 +51,7 @@ const help: Command = {
     /resume            恢复上次对话
     /sessions          列出历史会话
     /resume <id>       恢复指定会话
+    /search <kw>       搜索历史会话
 
   模型
     /model <name>      切换/查看模型
@@ -60,10 +61,16 @@ const help: Command = {
     /config            查看当前配置
     /policy <mode>     切换权限模式
     /approval <mode>   切换审批模式
+    /init              生成默认配置
 
   文件
     /diff              查看本次会话的文件变更
     /revert <file>     回退文件到修改前的状态
+
+  会话
+    /export <id>       导出会话为 Markdown
+    /tag <id> <tags>   给会话打标签
+    /cleanup           清理旧会话（保留最近 50 个）
 
   扩展
     /skills            列出已加载的技能
@@ -215,7 +222,7 @@ const policy: Command = {
   },
 }
 
-// ─── /approval（新命令）────────────────────────────────────────────────
+// ─── /approval ─────────────────────────────────────────────────────────
 const approval: Command = {
   name: 'approval',
   description: '切换审批模式',
@@ -267,7 +274,6 @@ const resume: Command = {
   argumentHint: '<可选：session_id>',
   execute: (args, ctx) => {
     if (args) {
-      // 恢复指定会话
       const session = getSession(args)
       if (!session) {
         return { type: 'error', content: `会话不存在: ${args}\n用 /sessions 查看可用会话。` }
@@ -277,14 +283,12 @@ const resume: Command = {
         return { type: 'info', content: `会话 ${args} 没有消息。` }
       }
       ctx.clearMessages()
-      // 注意：这里只返回信息，实际恢复由 App 处理
       return {
         type: 'info',
         content: `已恢复会话 ${args}（${msgs.length} 条消息）\n工作区: ${session.workspace}\n模型: ${session.model || '(默认)'}`,
       }
     }
 
-    // 默认恢复当前工作区的会话
     const msgs = loadSession()
     if (msgs.length === 0) {
       return { type: 'info', content: '没有可恢复的对话。' }
@@ -298,7 +302,7 @@ const resume: Command = {
   },
 }
 
-// ─── /sessions ─────────────────────────────────────────────────────
+// ─── /sessions ─────────────────────────────────────────────────────────
 const sessions: Command = {
   name: 'sessions',
   description: '列出历史会话',
@@ -322,7 +326,107 @@ const sessions: Command = {
   },
 }
 
-// ─── /skills ────────────────────────────────────────────────────────
+// ─── /search（新命令）─────────────────────────────────────────────────
+const search: Command = {
+  name: 'search',
+  description: '按关键词搜索历史会话',
+  aliases: [],
+  argumentHint: '<关键词>',
+  execute: (args) => {
+    if (!args) {
+      return { type: 'info', content: '用法: /search <关键词>\n在会话标题和消息中搜索。' }
+    }
+
+    const { searchSessions } = require('../storage/index.js') as { searchSessions: (kw: string) => any[] }
+    const results = searchSessions(args)
+
+    if (results.length === 0) {
+      return { type: 'info', content: `没有找到包含 "${args}" 的会话。` }
+    }
+
+    const lines = [`搜索结果（${results.length} 个会话）:\n`]
+    for (const r of results.slice(0, 20)) {
+      const date = r.created_at?.slice(0, 16) || '?'
+      lines.push(`  ${r.id}  ${date}  ${r.title || '(无标题)'}  ${r.match_count} 处匹配`)
+    }
+    return { type: 'info', content: lines.join('\n') }
+  },
+}
+
+// ─── /export（新命令）─────────────────────────────────────────────────
+const exportCmd: Command = {
+  name: 'export',
+  description: '导出会话为 Markdown 文件',
+  aliases: [],
+  argumentHint: '<session_id>',
+  execute: (args) => {
+    if (!args) {
+      return { type: 'info', content: '用法: /export <session_id>\n用 /sessions 查看可用会话。' }
+    }
+
+    const { exportSession } = require('../storage/index.js') as { exportSession: (id: string) => string | null }
+    const path = exportSession(args)
+    if (!path) {
+      return { type: 'error', content: `会话不存在: ${args}` }
+    }
+    return { type: 'action', content: `✅ 会话已导出到: ${path}` }
+  },
+}
+
+// ─── /tag（新命令）─────────────────────────────────────────────────────
+const tagCmd: Command = {
+  name: 'tag',
+  description: '给会话打标签分类',
+  aliases: [],
+  argumentHint: '<session_id> <tag1,tag2,...>',
+  execute: (args) => {
+    const sp = args.indexOf(' ')
+    if (sp === -1) {
+      return { type: 'info', content: '用法: /tag <session_id> <tag1,tag2,...>\n示例: /tag abc123 debug,auth\n\n管理标签:\n  /tag list        列出所有标签\n  /tag <id>        查看会话标签' }
+    }
+    const sessionId = args.slice(0, sp).trim()
+    const tagsStr = args.slice(sp + 1).trim()
+
+    if (tagsStr === 'list') {
+      const { listAllTags } = require('../storage/index.js') as { listAllTags: () => string[] }
+      const tags = listAllTags()
+      return { type: 'info', content: tags.length ? `标签: ${tags.join(', ')}` : '还没有标签。' }
+    }
+
+    const tags = tagsStr.split(',').map(t => t.trim()).filter(Boolean)
+    const { setSessionTags } = require('../storage/index.js') as { setSessionTags: (id: string, tags: string[]) => void }
+    setSessionTags(sessionId, tags)
+    return { type: 'action', content: `✅ 已给会话 ${sessionId} 打标签: ${tags.join(', ')}` }
+  },
+}
+
+// ─── /cleanup（新命令）─────────────────────────────────────────────────
+const cleanup: Command = {
+  name: 'cleanup',
+  description: '清理旧会话，保留最近 N 个',
+  aliases: [],
+  argumentHint: '<可选：保留数量，默认 50>',
+  execute: (args) => {
+    const keep = parseInt(args) || 50
+    const { cleanupSessions } = require('../storage/index.js') as { cleanupSessions: (keep: number) => number }
+    const deleted = cleanupSessions(keep)
+    return { type: 'action', content: `🧹 已清理 ${deleted} 个旧会话（保留最近 ${keep} 个）。` }
+  },
+}
+
+// ─── /init（新命令）───────────────────────────────────────────────────
+const init: Command = {
+  name: 'init',
+  description: '生成默认配置文件',
+  aliases: [],
+  execute: () => {
+    const { generateDefaultConfig } = require('../config/index.js') as { generateDefaultConfig: () => string }
+    const path = generateDefaultConfig()
+    return { type: 'action', content: `✅ 默认配置已生成: ${path}\n编辑配置文件后重启 edgecli 生效。` }
+  },
+}
+
+// ─── /skills ──────────────────────────────────────────────────────────
 const skills: Command = {
   name: 'skills',
   description: '列出已加载的技能',
@@ -333,7 +437,7 @@ const skills: Command = {
   },
 }
 
-// ─── /mcp ───────────────────────────────────────────────────────────
+// ─── /mcp ─────────────────────────────────────────────────────────────
 const mcp: Command = {
   name: 'mcp',
   description: '列出 MCP server 和可用工具',
@@ -358,7 +462,7 @@ const mcp: Command = {
   },
 }
 
-// ─── /doctor ────────────────────────────────────────────────────────
+// ─── /doctor ──────────────────────────────────────────────────────────
 const doctor: Command = {
   name: 'doctor',
   description: '健康检查',
@@ -369,9 +473,7 @@ const doctor: Command = {
   },
 }
 
-// ─── /sidebar ──────────────────────────────────────────────────────
-// 注意：侧边栏状态由 App 组件管理，这里只返回提示信息
-// 实际的切换由 App 中的 useInput 处理
+// ─── /sidebar ─────────────────────────────────────────────────────────
 const sidebar: Command = {
   name: 'sidebar',
   description: '切换侧边栏显示',
@@ -381,7 +483,7 @@ const sidebar: Command = {
   },
 }
 
-// ─── /diff（新命令）───────────────────────────────────────────────────
+// ─── /diff ────────────────────────────────────────────────────────────
 const diffCmd: Command = {
   name: 'diff',
   description: '查看本次会话的文件变更',
@@ -398,7 +500,6 @@ const diffCmd: Command = {
       lines.push(`  ${change.path}`)
       lines.push(`    ${change.toolName}: ${summary}`)
 
-      // 显示 diff（最多 20 行）
       const diff = getFileDiff(change.path)
       const diffLines = diff.split('\n').slice(0, 20)
       for (const dl of diffLines) {
@@ -419,7 +520,7 @@ const diffCmd: Command = {
   },
 }
 
-// ─── /revert（新命令）─────────────────────────────────────────────────
+// ─── /revert ──────────────────────────────────────────────────────────
 const revertCmd: Command = {
   name: 'revert',
   description: '回退文件到修改前的状态',
@@ -439,7 +540,7 @@ const revertCmd: Command = {
   },
 }
 
-// ─── /context（新命令）────────────────────────────────────────────────
+// ─── /context ─────────────────────────────────────────────────────────
 const contextCmd: Command = {
   name: 'context',
   description: '显示当前上下文使用情况',
@@ -485,7 +586,8 @@ const quit: Command = {
 // ─── 注册表 ────────────────────────────────────────────────────────────
 const COMMANDS: Command[] = [
   help, clear, compact, history, config, usage, model, think, policy, approval,
-  agent, dream, resume, sessions, skills, mcp, doctor, sidebar, diffCmd, revertCmd, contextCmd, quit,
+  agent, dream, resume, sessions, search, exportCmd, tagCmd, cleanup, init,
+  skills, mcp, doctor, sidebar, diffCmd, revertCmd, contextCmd, quit,
 ]
 
 export function processCommand(input: string, context: CommandContext): CommandResult | Promise<CommandResult> | null {
@@ -499,3 +601,69 @@ export function processCommand(input: string, context: CommandContext): CommandR
 }
 
 export function listCommands(): Command[] { return COMMANDS }
+
+// ─── 命令自动补全 ────────────────────────────────────────────────────
+/**
+ * 模糊匹配命令补全
+ * 输入 "/co" → ["/compact", "/config"]
+ * 输入 "/ap" → ["/approval"]
+ * 输入 "/" → 所有命令列表
+ */
+export function autocompleteCommand(partial: string): string[] {
+  if (!partial.startsWith('/')) return []
+
+  const query = partial.slice(1).toLowerCase()
+
+  // 如果只输入了 "/"，返回所有命令名
+  if (!query) {
+    return COMMANDS.map(c => `/${c.name}`)
+  }
+
+  const matches: string[] = []
+  for (const cmd of COMMANDS) {
+    // 精确前缀匹配
+    if (cmd.name.startsWith(query)) {
+      matches.push(`/${cmd.name}`)
+      continue
+    }
+    // 别名匹配
+    if (cmd.aliases?.some(a => a.startsWith(query))) {
+      matches.push(`/${cmd.name}`)
+      continue
+    }
+    // 模糊匹配：query 中的字符在 cmd.name 中顺序出现
+    if (fuzzyMatch(query, cmd.name)) {
+      matches.push(`/${cmd.name}`)
+    }
+  }
+
+  return matches
+}
+
+/** 模糊匹配：pattern 中的字符按顺序出现在 target 中 */
+function fuzzyMatch(pattern: string, target: string): boolean {
+  if (pattern.length > target.length) return false
+  let pi = 0
+  for (let ti = 0; ti < target.length && pi < pattern.length; ti++) {
+    if (pattern[pi] === target[ti]) pi++
+  }
+  return pi === pattern.length
+}
+
+/**
+ * 获取命令补全建议的格式化字符串
+ * 用于在 UI 中显示补全提示
+ */
+export function getCompletionsDisplay(partial: string): string {
+  const matches = autocompleteCommand(partial)
+  if (matches.length === 0) return ''
+  if (matches.length === 1) return matches[0]
+
+  // 多个匹配时显示列表
+  const lines = [`匹配 ${matches.length} 个命令:`]
+  for (const m of matches) {
+    const cmd = COMMANDS.find(c => '/' + c.name === m)
+    lines.push(`  ${m}  ${cmd?.description || ''}`)
+  }
+  return lines.join('\n')
+}
