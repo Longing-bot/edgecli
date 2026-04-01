@@ -56,7 +56,11 @@ if (process.stdin.isTTY && process.stdout.isTTY && !args.includes('--print')) {
 } else {
   if (!prompt) { console.log('edgecli（非交互模式）。用 edgecli --help 查看用法。'); process.exit(0) }
 
-  const cmdResult = processCommand(prompt)
+  const sessionMsgs = loadSession()
+  const cmdResult = processCommand(prompt, {
+    messages: sessionMsgs,
+    clearMessages: () => {},
+  })
   if (cmdResult) {
     console.log(cmdResult.content)
     process.exit(cmdResult.type === 'error' ? 1 : 0)

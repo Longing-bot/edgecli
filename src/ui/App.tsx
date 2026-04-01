@@ -76,7 +76,11 @@ export const App: React.FC<Props> = ({ initialPrompt }) => {
   const [running, setRunning] = useState(false)
   const [turn, setTurn] = useState(0)
   const [turnStart, setTurnStart] = useState(Date.now())
-  const [msgs, setMsgs] = useState<Message[]>(createREPLState().messages)
+  const [msgs, setMsgs] = useState<Message[]>(() => {
+    // CC 风格：启动时自动恢复上次对话
+    const saved = loadSession()
+    return saved.length > 0 ? saved : createREPLState().messages
+  })
   // 权限审批状态
   const [pendingTool, setPendingTool] = useState<{ name: string; args: string } | null>(null)
   const [toolResolve, setToolResolve] = useState<((value: boolean) => void) | null>(null)
@@ -90,7 +94,10 @@ export const App: React.FC<Props> = ({ initialPrompt }) => {
   const submit = useCallback(async (text: string) => {
     if (!text.trim()) return
 
-    const cmd = processCommand(text.trim())
+    const cmd = processCommand(text.trim(), {
+      messages: msgs,
+      clearMessages: () => setMsgs([]),
+    })
     if (cmd) {
       add({ type: 'command', content: cmd.content })
       if (cmd.clearHistory) setMsgs([])
