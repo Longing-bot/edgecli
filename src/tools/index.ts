@@ -2,7 +2,7 @@
 // CC-inspired: clear constraints per tool, banned commands, safety checks
 
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from 'fs'
-import { resolve } from 'path'
+import { resolve, dirname, basename } from 'path'
 import { execSync } from 'child_process'
 
 const MAX = 12000
@@ -51,7 +51,7 @@ export const writeFileTool: ToolDef = {
   execute({ file_path, content }) {
     try {
       const p = resolve(file_path)
-      mkdirSync(p.substring(0, p.lastIndexOf('/')), { recursive: true })
+      mkdirSync(dirname(p), { recursive: true })
       const existed = existsSync(p)
       const old = existed ? readFileSync(p, 'utf-8').trim().split('\n').length : 0
       writeFileSync(p, content)
@@ -80,7 +80,7 @@ OpenCode 风格注意事项：
       if (!n) return err('old_string not found. Re-read the file.')
       if (n > 1) return err(`Found ${n} times. Include more context.`)
       writeFileSync(p, c.replace(old_string, new_string))
-      return ok(`✏️ Edited ${p.split('/').pop()} (${old_string.split('\n').length}→${new_string.split('\n').length} lines)`)
+      return ok(`✏️ Edited ${basename(p)} (${old_string.split('\n').length}→${new_string.split('\n').length} lines)`)
     } catch (ex: any) { return err(ex.message) }
   }
 }
