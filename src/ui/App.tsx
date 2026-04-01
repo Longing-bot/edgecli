@@ -20,24 +20,19 @@ interface Entry {
   timestamp?: number
 }
 
-// ─── Spinner（CC Shimmer 风格）─────────────────────────────────────────
-const SPIN_VERBS = ['思考中', '编码中', '分析中', '搜索中', '读取中', '执行中', '编写中', '修改中']
+// ─── Spinner ────────────────────────────────────────────────────────
 const SPIN_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
-function Spinner({ turn, startTime }: { turn: number; startTime: number }) {
+function Spinner({ status, startTime, turn }: { status: string; startTime: number; turn: number }) {
   const [frame, setFrame] = useState(0)
   const [elapsed, setElapsed] = useState(0)
-  const [verbIdx, setVerbIdx] = useState(() => Math.floor(Math.random() * SPIN_VERBS.length))
 
   useEffect(() => {
     const iv = setInterval(() => {
       setFrame(f => (f + 1) % SPIN_FRAMES.length)
       setElapsed(Math.round((Date.now() - startTime) / 1000))
     }, 80)
-    const iv2 = setInterval(() => {
-      setVerbIdx(v => (v + 1) % SPIN_VERBS.length)
-    }, 3000)
-    return () => { clearInterval(iv); clearInterval(iv2) }
+    return () => clearInterval(iv)
   }, [startTime])
 
   const sec = elapsed >= 60
@@ -47,11 +42,27 @@ function Spinner({ turn, startTime }: { turn: number; startTime: number }) {
   return (
     <Box marginLeft={2}>
       <Text color="cyan">{SPIN_FRAMES[frame]} </Text>
-      <Text color="cyan">{SPIN_VERBS[verbIdx]}…</Text>
+      <Text color="cyan">{status}…</Text>
       <Text dimColor> {sec}</Text>
       {turn > 1 && <Text dimColor> · 第 {turn} 轮</Text>}
     </Box>
   )
+}
+
+// 工具名 → 状态文案
+function toolStatus(name: string): string {
+  const map: Record<string, string> = {
+    bash: '执行中',
+    read_file: '读取中',
+    write_file: '写入中',
+    edit_file: '编辑中',
+    glob: '搜索中',
+    grep: '搜索中',
+    web_search: '搜索中',
+    fetch: '请求中',
+    todo: '处理中',
+  }
+  return map[name] || '执行中'
 }
 
 // ─── 危险命令检测 ─────────────────────────────────────────────────────
@@ -79,6 +90,7 @@ export const App: React.FC<Props> = ({ initialPrompt }) => {
   const [running, setRunning] = useState(false)
   const [turn, setTurn] = useState(0)
   const [turnStart, setTurnStart] = useState(Date.now())
+  const [spinnerStatus, setSpinnerStatus] = useState('思考中')
   const [msgs, setMsgs] = useState<Message[]>(() => {
     // CC 风格：启动时自动恢复上次对话
     const saved = loadSession()
@@ -121,6 +133,7 @@ export const App: React.FC<Props> = ({ initialPrompt }) => {
     try {
       const updated = await runQuery(text, config, [...msgs], {
         onToken: t => {
+          setSpinnerStatus('思考中')
           setEntries(prev => {
             const last = prev[prev.length - 1]
             if (last?.type === 'assistant') {
@@ -130,6 +143,7 @@ export const App: React.FC<Props> = ({ initialPrompt }) => {
           })
         },
         onToolStart: (n, a) => {
+          setSpinnerStatus(toolStatus(n))
           // 检查危险命令
           if (n === 'bash' && isDangerousCommand(a)) {
             add({ type: 'tool', content: `⚠️ ${n}(${a.length > 50 ? a.slice(0, 50) + '…' : a})`, toolName: n, toolArgs: a })
@@ -299,7 +313,7 @@ export const App: React.FC<Props> = ({ initialPrompt }) => {
       ))}
 
       {/* Spinner */}
-      {running && <Spinner turn={turn} startTime={turnStart} />}
+      {running && <Spinner turn={turn} startTime={turnStart} status={spinnerStatus} />}
 
       {/* Permission dialog (CC style) */}
       {pendingTool && (
