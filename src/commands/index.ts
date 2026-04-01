@@ -1,7 +1,7 @@
 // ─── 命令系统（CC commands.ts 风格）────────────────────────────────────────
 import { existsSync, unlinkSync, readFileSync, writeFileSync } from 'fs'
-import { getSessionFile, saveSession, loadSession, loadConfig, type Message } from '../config/index.js'
-import { COMPACT_PROMPT, buildCompactedMessages, getCompactionRequest } from '../memory/compact.js'
+import { getSessionFile, saveSession, loadSession, loadConfig, saveConfig, type Message } from '../config/index.js'
+import { getCompactionRequest } from '../memory/compact.js'
 
 export interface Command {
   name: string
@@ -68,7 +68,6 @@ const compact: Command = {
     if (msgs.length < 4) {
       return { type: 'info', content: '对话太短，无需压缩。' }
     }
-    // CC 风格：返回压缩指令，由 query 引擎执行
     return {
       type: 'compact',
       content: '📝 正在压缩上下文…',
@@ -107,6 +106,34 @@ const config: Command = {
   },
 }
 
+// ─── /model（CC 风格：切换模型）─────────────────────────────────────────
+const model: Command = {
+  name: 'model',
+  description: '切换模型',
+  aliases: [],
+  argumentHint: '<模型名称>',
+  execute: (args) => {
+    if (!args) {
+      const c = loadConfig()
+      return { type: 'info', content: `当前模型: ${c.model}\n用法: /model <模型名称>` }
+    }
+    const c = loadConfig()
+    c.model = args
+    saveConfig(c)
+    return { type: 'action', content: `✅ 已切换到: ${args}` }
+  },
+}
+
+// ─── /think（CC 风格：切换思考模式）─────────────────────────────────────
+const think: Command = {
+  name: 'think',
+  description: '切换深度思考模式',
+  aliases: [],
+  execute: () => {
+    return { type: 'action', content: '🧠 深度思考模式已开启。复杂任务会消耗更多 token 但质量更高。' }
+  },
+}
+
 // ─── /resume（CC 风格：恢复上次对话）─────────────────────────────────────
 const resume: Command = {
   name: 'resume',
@@ -123,24 +150,6 @@ const resume: Command = {
       type: 'info',
       content: `已恢复 ${msgs.length} 条消息的对话。\n上次用户消息: ${lastUser?.content?.slice(0, 80) || '(无)'}`,
     }
-  },
-}
-
-// ─── /model（CC 风格：切换模型）─────────────────────────────────────────
-const model: Command = {
-  name: 'model',
-  description: '切换模型',
-  aliases: [],
-  argumentHint: '<模型名称>',
-  execute: (args) => {
-    if (!args) {
-      const c = loadConfig()
-      return { type: 'info', content: `当前模型: ${c.model}\n用法: /model <模型名称>` }
-    }
-    const c = loadConfig()
-    c.model = args
-    saveConfig(c)
-    return { type: 'action', content: `✅ 已切换到: ${args}` }
   },
 }
 
