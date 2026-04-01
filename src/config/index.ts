@@ -200,21 +200,35 @@ export function getSessionFile(): string {
   mkdirSync(HISTORY_DIR, { recursive: true })
   return join(HISTORY_DIR, createHash('md5').update(process.cwd()).digest('hex').slice(0, 12) + '.json')
 }
+
+// 向后兼容：优先从 SQLite 加载，fallback JSON
 export function loadSession(): Message[] {
-  const f = getSessionFile()
-  if (existsSync(f)) {
-    try {
-      const raw = JSON.parse(readFileSync(f, "utf-8"))
-      // 向后兼容：旧格式是纯数组
-      if (Array.isArray(raw)) return raw
-      // 新格式：{ version, messages }
-      if (raw.version && Array.isArray(raw.messages)) return raw.messages
-      return []
-    } catch(_e) {}
+  try {
+    const { loadSession: loadFromStorage } = require('../storage/index.js')
+    return loadFromStorage()
+  } catch {
+    // fallback 到旧版 JSON
+    const f = getSessionFile()
+    if (existsSync(f)) {
+      try {
+        const raw = JSON.parse(readFileSync(f, "utf-8"))
+        if (Array.isArray(raw)) return raw
+        if (raw.version && Array.isArray(raw.messages)) return raw.messages
+        return []
+      } catch(_e) {}
+    }
+    return []
   }
-  return []
 }
+
 export function saveSession(msgs: Message[]) {
-  const data: SessionData = { version: SESSION_VERSION, messages: msgs.slice(-40) }
-  writeFileSync(getSessionFile(), JSON.stringify(data, null, 2))
+  try {
+    const { saveSession: saveToStorage } = require('../storage/index.js')
+    saveToStorage(undefined, msgs)
+  } catch {
+    // fallback 到旧版 JSON
+    const data: SessionData = { version: SESSION_VERSION, messages: msgs.slice(-40) }
+    mkdirSync(HISTORY_DIR, { recursive: true })
+    writeFileSync(getSessionFile(), JSON.stringify(data, null, 2))
+  }
 }

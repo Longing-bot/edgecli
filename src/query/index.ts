@@ -7,7 +7,7 @@
 //   - 工具并行调用支持
 //   - 错误恢复：失败信息反馈给 LLM
 
-import { CodoConfig, Message, detectProvider, saveSession, getUsageTracker, type TokenUsage } from '../config/index.js'
+import { CodoConfig, Message, detectProvider, getUsageTracker, type TokenUsage } from '../config/index.js'
 import { callLLM } from '../api/index.js'
 import { findTool, toOpenAI, toAnthropic, getActiveTools, activateLazyTool, CORE_TOOLS, LAZY_TOOLS, type ToolResult } from '../tools/index.js'
 import { buildSystemPrompt } from '../prompts/system.js'
@@ -19,6 +19,11 @@ import { checkPermission } from '../permissions/index.js'
 import { collectContext, formatContextForPrompt } from '../context/index.js'
 import { snapshotBefore, recordChange, formatChangeSummary } from '../tracker/index.js'
 import { needsApproval, handleApprovalDecision, type ApprovalDecision, type ApprovalRequest } from '../approval/index.js'
+import { saveSession as saveSessionDB, initWorkspaceSession } from '../storage/index.js'
+import { getMCPTools, initMCPServers } from '../mcp/index.js'
+
+// MCP 初始化标志
+let mcpInitialized = false
 
 // ─── 配置 ────────────────────────────────────────────────────────────
 const MAX_TOOL_ROUNDS = 25          // 最大工具调用轮数
@@ -124,6 +129,15 @@ export async function runQuery(
   callbacks: QueryCallbacks = {},
 ): Promise<Message[]> {
   const { onText, onToken, onToolStart, onToolResult, onTurn, onUsage, onError, onApprovalNeeded } = callbacks
+
+  // 初始化 MCP servers（仅首次）
+  if (!mcpInitialized) {
+    mcpInitialized = true
+    initMCPServers().catch(() => {}) // 静默失败
+  }
+
+  // 初始化 workspace session
+  initWorkspaceSession(config.model)
 
   // 系统提示词（带上下文感知）
   if (!messages.length || messages[0].role !== 'system') {
@@ -251,9 +265,21 @@ export async function runQuery(
       if (lazyTool && !getActiveTools().find(t => t.name === tc.function.name)) {
         activateLazyTool(tc.function.name)
         const activeTools = [...getActiveTools()]
+        // 添加 MCP 工具
+        const mcpTools = getMCPTools()
+        const allTools = [...activeTools, ...mcpTools]
         tools = detectProvider(config) === 'anthropic'
-          ? toAnthropic(activeTools)
-          : toOpenAI(activeTools)
+          ? toAnthropic(allTools)
+          : toOpenAI(allTools)
+      }
+
+      // MCP 工具调用（mcp_ 前缀）
+      if (tc.function.name.startsWith('mcp_')) {
+        const mcpTools = getMCPTools()
+        const allActive = [...getActiveTools(), ...mcpTools]
+        tools = detectProvider(config) === 'anthropic'
+          ? toAnthropic(allActive)
+          : toOpenAI(allActive)
       }
     }
 
@@ -339,6 +365,7 @@ export async function runQuery(
     }
   }
 
-  saveSession(messages)
+  // 保存会话到 SQLite
+  saveSessionDB(undefined, messages)
   return messages
 }

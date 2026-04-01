@@ -160,6 +160,112 @@ export const fetchTool: ToolDef = {
 import { todoTool } from './todo.js'
 import { webSearchTool } from './websearch.js'
 
+// ─── LSP Tools ─────────────────────────────────────────────────────
+import { lspComplete, lspDefinition, lspReferences, lspHover } from '../lsp/index.js'
+
+export const lspCompleteTool: ToolDef = {
+  name: 'lsp_complete',
+  description: 'Get code completions at a specific position in a file. Uses LSP for intelligent suggestions.',
+  parameters: {
+    type: 'object',
+    properties: {
+      file_path: { type: 'string', description: 'Path to the source file' },
+      line: { type: 'integer', description: 'Line number (0-indexed)' },
+      character: { type: 'integer', description: 'Character position (0-indexed)' },
+    },
+    required: ['file_path', 'line', 'character'],
+  },
+  async execute({ file_path, line, character }) {
+    try {
+      const result = await lspComplete(file_path, line, character)
+      if (result.items.length === 0) return ok('没有可用的补全建议。')
+      const items = result.items.slice(0, 20).map(i => {
+        let detail = i.label
+        if (i.detail) detail += ` - ${i.detail}`
+        return detail
+      })
+      return ok(`补全建议（${result.items.length} 个${result.isIncomplete ? ', 未完全' : ''}）:\n${items.join('\n')}`)
+    } catch (e: any) {
+      return err(`LSP 补全失败: ${e.message}`)
+    }
+  },
+}
+
+export const lspDefinitionTool: ToolDef = {
+  name: 'lsp_definition',
+  description: 'Find the definition of a symbol at a specific position. Jump to where it is defined.',
+  parameters: {
+    type: 'object',
+    properties: {
+      file_path: { type: 'string', description: 'Path to the source file' },
+      line: { type: 'integer', description: 'Line number (0-indexed)' },
+      character: { type: 'integer', description: 'Character position (0-indexed)' },
+    },
+    required: ['file_path', 'line', 'character'],
+  },
+  async execute({ file_path, line, character }) {
+    try {
+      const result = await lspDefinition(file_path, line, character)
+      if (result.locations.length === 0) return ok('没有找到定义。')
+      const locs = result.locations.map(l =>
+        `${l.uri.replace('file://', '')}:${l.range.start.line + 1}:${l.range.start.character + 1}`
+      )
+      return ok(`定义位置:\n${locs.join('\n')}`)
+    } catch (e: any) {
+      return err(`LSP 查找定义失败: ${e.message}`)
+    }
+  },
+}
+
+export const lspReferencesTool: ToolDef = {
+  name: 'lsp_references',
+  description: 'Find all references to a symbol at a specific position across the codebase.',
+  parameters: {
+    type: 'object',
+    properties: {
+      file_path: { type: 'string', description: 'Path to the source file' },
+      line: { type: 'integer', description: 'Line number (0-indexed)' },
+      character: { type: 'integer', description: 'Character position (0-indexed)' },
+    },
+    required: ['file_path', 'line', 'character'],
+  },
+  async execute({ file_path, line, character }) {
+    try {
+      const result = await lspReferences(file_path, line, character)
+      if (result.locations.length === 0) return ok('没有找到引用。')
+      const locs = result.locations.map(l =>
+        `${l.uri.replace('file://', '')}:${l.range.start.line + 1}:${l.range.start.character + 1}`
+      )
+      return ok(`引用位置（${result.locations.length} 个）:\n${locs.slice(0, 30).join('\n')}${locs.length > 30 ? `\n... 还有 ${locs.length - 30} 个` : ''}`)
+    } catch (e: any) {
+      return err(`LSP 查找引用失败: ${e.message}`)
+    }
+  },
+}
+
+export const lspHoverTool: ToolDef = {
+  name: 'lsp_hover',
+  description: 'Get hover information (type, documentation) for a symbol at a specific position.',
+  parameters: {
+    type: 'object',
+    properties: {
+      file_path: { type: 'string', description: 'Path to the source file' },
+      line: { type: 'integer', description: 'Line number (0-indexed)' },
+      character: { type: 'integer', description: 'Character position (0-indexed)' },
+    },
+    required: ['file_path', 'line', 'character'],
+  },
+  async execute({ file_path, line, character }) {
+    try {
+      const result = await lspHover(file_path, line, character)
+      if (!result) return ok('没有悬停信息。')
+      return ok(result.content)
+    } catch (e: any) {
+      return err(`LSP 悬停失败: ${e.message}`)
+    }
+  },
+}
+
 // ─── Agent Tool (Sub-agent) ────────────────────────────────────────────
 import { runSubAgent } from '../agent/subagent.js'
 
@@ -223,7 +329,7 @@ subagent_type:
 }
 
 // ─── ToolSearch Tool（延迟加载辅助）──────────────────────────────────────
-const ALL_TOOL_DEFS: ToolDef[] = [readFileTool, writeFileTool, editFileTool, bashTool, globTool, grepTool, fetchTool, todoTool, webSearchTool, agentTool]
+const ALL_TOOL_DEFS: ToolDef[] = [readFileTool, writeFileTool, editFileTool, bashTool, globTool, grepTool, fetchTool, todoTool, webSearchTool, agentTool, lspCompleteTool, lspDefinitionTool, lspReferencesTool, lspHoverTool]
 
 export const toolSearchTool: ToolDef = {
   name: 'tool_search',
@@ -247,7 +353,7 @@ export const toolSearchTool: ToolDef = {
 // 核心工具（始终注册）
 export const CORE_TOOLS: ToolDef[] = [readFileTool, writeFileTool, editFileTool, bashTool, globTool, grepTool]
 // 延迟工具（按需加载）
-export const LAZY_TOOLS: ToolDef[] = [fetchTool, todoTool, webSearchTool, agentTool, toolSearchTool]
+export const LAZY_TOOLS: ToolDef[] = [fetchTool, todoTool, webSearchTool, agentTool, toolSearchTool, lspCompleteTool, lspDefinitionTool, lspReferencesTool, lspHoverTool]
 // 全部工具
 export const ALL_TOOLS: ToolDef[] = [...CORE_TOOLS, ...LAZY_TOOLS]
 

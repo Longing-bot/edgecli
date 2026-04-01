@@ -9,6 +9,10 @@ import { estimateMessageTokens, getContextStats } from '../memory/index.js'
 import { collectContext, formatContextForPrompt } from '../context/index.js'
 import { getChangedFiles, getFileDiff, revertFile, getTrackerStats, clearTracker } from '../tracker/index.js'
 import { getApprovalMode, setApprovalMode } from '../approval/index.js'
+import { listSessions, getSession, getMessages, initWorkspaceSession, deleteSession, type SessionRecord } from '../storage/index.js'
+import { listAllLoadedSkills, formatSkillsList } from '../skills/index.js'
+import { runHealthCheck, formatHealthReport } from '../healthcheck/index.js'
+import { getMCPServerStatuses, initMCPServers } from '../mcp/index.js'
 
 export interface Command {
   name: string
@@ -45,6 +49,8 @@ const help: Command = {
     /compact           压缩上下文，保留摘要
     /history           查看消息统计
     /resume            恢复上次对话
+    /sessions          列出历史会话
+    /resume <id>       恢复指定会话
 
   模型
     /model <name>      切换/查看模型
@@ -53,11 +59,16 @@ const help: Command = {
   配置
     /config            查看当前配置
     /policy <mode>     切换权限模式
-    /approval <mode>   切换审批模式 (always-ask|auto-approve-safe|full-auto)
+    /approval <mode>   切换审批模式
 
   文件
     /diff              查看本次会话的文件变更
     /revert <file>     回退文件到修改前的状态
+
+  扩展
+    /skills            列出已加载的技能
+    /mcp               列出 MCP server 和工具
+    /doctor            健康检查
 
   信息
     /context           显示当前上下文使用情况
@@ -251,9 +262,29 @@ const dream: Command = {
 // ─── /resume ───────────────────────────────────────────────────────────
 const resume: Command = {
   name: 'resume',
-  description: '恢复上次对话',
+  description: '恢复对话',
   aliases: ['continue'],
-  execute: (_, ctx) => {
+  argumentHint: '<可选：session_id>',
+  execute: (args, ctx) => {
+    if (args) {
+      // 恢复指定会话
+      const session = getSession(args)
+      if (!session) {
+        return { type: 'error', content: `会话不存在: ${args}\n用 /sessions 查看可用会话。` }
+      }
+      const msgs = getMessages(args)
+      if (msgs.length === 0) {
+        return { type: 'info', content: `会话 ${args} 没有消息。` }
+      }
+      ctx.clearMessages()
+      // 注意：这里只返回信息，实际恢复由 App 处理
+      return {
+        type: 'info',
+        content: `已恢复会话 ${args}（${msgs.length} 条消息）\n工作区: ${session.workspace}\n模型: ${session.model || '(默认)'}`,
+      }
+    }
+
+    // 默认恢复当前工作区的会话
     const msgs = loadSession()
     if (msgs.length === 0) {
       return { type: 'info', content: '没有可恢复的对话。' }
@@ -264,6 +295,89 @@ const resume: Command = {
       type: 'info',
       content: `已恢复 ${msgs.length} 条消息的对话。\n上次用户消息: ${lastUser?.content?.slice(0, 80) || '(无)'}`,
     }
+  },
+}
+
+// ─── /sessions ─────────────────────────────────────────────────────
+const sessions: Command = {
+  name: 'sessions',
+  description: '列出历史会话',
+  aliases: [],
+  execute: () => {
+    const records = listSessions(20)
+    if (records.length === 0) {
+      return { type: 'info', content: '没有历史会话。\n会话在首次对话时自动创建。' }
+    }
+
+    const lines = ['历史会话:\n']
+    for (const s of records) {
+      const date = s.created_at?.slice(0, 16) || '?'
+      const msgCount = getMessages(s.id).length
+      const workspace = s.workspace ? s.workspace.split('/').pop() : '?'
+      lines.push(`  ${s.id}  ${date}  ${workspace}  ${s.model || '(默认)'}  ${msgCount} 条消息`)
+    }
+    lines.push(`\n共 ${records.length} 个会话。用 /resume <id> 恢复。`)
+
+    return { type: 'info', content: lines.join('\n') }
+  },
+}
+
+// ─── /skills ────────────────────────────────────────────────────────
+const skills: Command = {
+  name: 'skills',
+  description: '列出已加载的技能',
+  aliases: [],
+  execute: () => {
+    const loaded = listAllLoadedSkills()
+    return { type: 'info', content: formatSkillsList(loaded) }
+  },
+}
+
+// ─── /mcp ───────────────────────────────────────────────────────────
+const mcp: Command = {
+  name: 'mcp',
+  description: '列出 MCP server 和可用工具',
+  aliases: [],
+  execute: async () => {
+    const statuses = getMCPServerStatuses()
+    if (statuses.length === 0) {
+      return { type: 'info', content: '没有已连接的 MCP server。\n\n配置文件: ~/.edgecli/mcp.json\n示例:\n{\n  "servers": {\n    "filesystem": {\n      "command": "npx",\n      "args": ["-y", "@anthropic-ai/mcp-server-filesystem", "/path"]\n    }\n  }\n}' }
+    }
+
+    const lines = ['MCP Servers:\n']
+    for (const s of statuses) {
+      const status = s.connected ? '✅' : '❌'
+      lines.push(`  ${status} ${s.name}（${s.toolCount} 个工具）`)
+      if (s.tools.length > 0) {
+        for (const tool of s.tools) {
+          lines.push(`     - mcp_${s.name}_${tool}`)
+        }
+      }
+    }
+    return { type: 'info', content: lines.join('\n') }
+  },
+}
+
+// ─── /doctor ────────────────────────────────────────────────────────
+const doctor: Command = {
+  name: 'doctor',
+  description: '健康检查',
+  aliases: ['health'],
+  execute: () => {
+    const results = runHealthCheck()
+    return { type: 'info', content: formatHealthReport(results) }
+  },
+}
+
+// ─── /sidebar ──────────────────────────────────────────────────────
+// 注意：侧边栏状态由 App 组件管理，这里只返回提示信息
+// 实际的切换由 App 中的 useInput 处理
+const sidebar: Command = {
+  name: 'sidebar',
+  description: '切换侧边栏显示',
+  aliases: [],
+  execute: () => {
+    return { type: 'action', content: '📋 侧边栏切换（使用 Ctrl+B 切换显示）' }
   },
 }
 
@@ -371,7 +485,7 @@ const quit: Command = {
 // ─── 注册表 ────────────────────────────────────────────────────────────
 const COMMANDS: Command[] = [
   help, clear, compact, history, config, usage, model, think, policy, approval,
-  agent, dream, resume, diffCmd, revertCmd, contextCmd, quit,
+  agent, dream, resume, sessions, skills, mcp, doctor, sidebar, diffCmd, revertCmd, contextCmd, quit,
 ]
 
 export function processCommand(input: string, context: CommandContext): CommandResult | Promise<CommandResult> | null {
