@@ -228,6 +228,39 @@ async function callOpenAI(
   throw new Error('重试次数耗尽')
 }
 
+// ─── 缓存预热（CC-inspired）───────────────────────────────────────────
+// 首次请求前发 dummy 预填 KV cache，隐藏首次延迟
+let cacheWarmed = false
+export async function warmupCache(config: CodoConfig): Promise<void> {
+  if (cacheWarmed) return
+  cacheWarmed = true
+
+  try {
+    const key = getApiKey(config)
+    if (!key) return
+
+    const isAnthropic = detectProvider(config) === 'anthropic'
+    if (!isAnthropic) return  // 目前只对 Anthropic/兼容 API 生效
+
+    const client = new Anthropic({
+      apiKey: key,
+      baseURL: config.baseUrl.replace(/\/$/, ''),
+      defaultHeaders: config.baseUrl.includes('longcat') ? { Authorization: `Bearer ${key}` } : undefined,
+      dangerouslyAllowBrowser: true,
+    })
+
+    // Dummy 请求：最小 token，只预热 system prompt 的 KV cache
+    await client.messages.create({
+      model: config.model,
+      max_tokens: 1,
+      system: ' ',
+      messages: [{ role: 'user', content: 'count' }],
+    }).catch(() => {})  // 静默失败，不影响主流程
+  } catch {
+    // 静默失败
+  }
+}
+
 // ─── 统一入口 ──────────────────────────────────────────────────────────
 export async function callLLM(
   messages: Message[], tools: any[], config: CodoConfig, stream?: StreamCallbacks, signal?: AbortSignal

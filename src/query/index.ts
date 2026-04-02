@@ -13,7 +13,7 @@
 //   - 成本追踪
 
 import { CodoConfig, Message, detectProvider, getUsageTracker, type TokenUsage, type ToolCall } from '../config/index.js'
-import { callLLM } from '../api/index.js'
+import { callLLM, warmupCache } from '../api/index.js'
 import { findTool, toOpenAI, toAnthropic, getActiveTools, activateLazyTool, CORE_TOOLS, LAZY_TOOLS, type ToolResult } from '../tools/index.js'
 import { buildSystemPrompt } from '../prompts/system.js'
 import { executePreToolHooks, executePostToolHooks, executeStopHooks } from '../hooks/index.js'
@@ -386,6 +386,9 @@ export async function runQuery(
     taskId: null,
     streamingResults: new Map(),
   }
+
+  // 缓存预热（首次请求前，预填 KV cache）
+  warmupCache(config).catch(() => {})
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
