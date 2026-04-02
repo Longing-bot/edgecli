@@ -3,7 +3,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { CodoConfig, Message, ToolCall, getApiKey, detectProvider, type TokenUsage } from '../config/index.js'
 
-export interface LLMResponse { content: string; toolCalls: ToolCall[]; usage?: TokenUsage }
+export interface LLMResponse { content: string; toolCalls: ToolCall[]; usage?: TokenUsage; stopReason?: string }
 
 const MAX_RETRIES = 3
 
@@ -75,6 +75,7 @@ async function callAnthropic(
         const toolCalls: ToolCall[] = []
         let currentTool: any = null
         let usage: TokenUsage | undefined
+        let stopReason: string | undefined
 
         for await (const event of response) {
           if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
@@ -95,17 +96,22 @@ async function callAnthropic(
             stream.onToolUse?.(currentTool)
             currentTool = null
           }
-          if (event.type === 'message_delta' && (event as any).usage) {
-            const u = (event as any).usage
-            usage = {
-              input_tokens: u.input_tokens || 0,
-              output_tokens: u.output_tokens || 0,
-              cache_creation_input_tokens: u.cache_creation_input_tokens || 0,
-              cache_read_input_tokens: u.cache_read_input_tokens || 0,
+          if (event.type === 'message_delta') {
+            if ((event as any).delta?.stop_reason) {
+              stopReason = (event as any).delta.stop_reason
+            }
+            if ((event as any).usage) {
+              const u = (event as any).usage
+              usage = {
+                input_tokens: u.input_tokens || 0,
+                output_tokens: u.output_tokens || 0,
+                cache_creation_input_tokens: u.cache_creation_input_tokens || 0,
+                cache_read_input_tokens: u.cache_read_input_tokens || 0,
+              }
             }
           }
         }
-        return { content, toolCalls, usage }
+        return { content, toolCalls, usage, stopReason }
       }
 
       // 非流式
@@ -126,7 +132,7 @@ async function callAnthropic(
         cache_creation_input_tokens: (msg.usage as any).cache_creation_input_tokens || 0,
         cache_read_input_tokens: (msg.usage as any).cache_read_input_tokens || 0,
       } : undefined
-      return { content, toolCalls, usage }
+      return { content, toolCalls, usage, stopReason: (msg as any).stop_reason }
 
     } catch (ex: any) {
       if (ex.name === 'AbortError' || signal?.aborted) throw new Error('请求已取消')

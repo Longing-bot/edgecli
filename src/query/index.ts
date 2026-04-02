@@ -228,115 +228,72 @@ function selectToolsForTask(toolCalls: Array<{ function: { name: string } }>): s
   return []
 }
 
-// ─── 自动验证：编辑后自动 lint/typecheck ────────────────────────────────
+// ─── 自动验证：编辑后自动 lint/typecheck（Aider Linter 增强版）─────────
 interface AutoVerifyResult {
   hasErrors: boolean
   output: string
 }
 
+// 延迟导入 Linter（避免循环依赖）
+let _linter: any = null
+async function getLinter() {
+  if (!_linter) {
+    const { Linter } = await import('../linter/index.js')
+    _linter = new Linter(process.cwd())
+  }
+  return _linter
+}
+
 async function autoVerifyEdit(filePath: string): Promise<AutoVerifyResult> {
-  const { resolve: pathResolve, extname, basename, join, dirname } = await import('path')
-  const { existsSync, readFileSync } = await import('fs')
+  try {
+    const linter = await getLinter()
+    const output = linter.lint(filePath)
+    if (!output || !output.result) {
+      return { hasErrors: false, output: '' }
+    }
+
+    const formatted = linter.formatLintOutput(output)
+    return {
+      hasErrors: output.result.hasErrors,
+      output: formatted,
+    }
+  } catch {
+    // Linter 失败不影响主流程，fallback 到旧版检查
+    return autoVerifyEditFallback(filePath)
+  }
+}
+
+// Fallback：旧版简单检查（当 Linter 模块不可用时）
+async function autoVerifyEditFallback(filePath: string): Promise<AutoVerifyResult> {
+  const { resolve: pathResolve, extname, join, dirname: dirName } = await import('path')
+  const { existsSync } = await import('fs')
   const { execSync } = await import('child_process')
 
   const absPath = pathResolve(filePath)
   const ext = extname(absPath)
-  const dir = dirname(absPath)
-
-  // 检测项目类型
-  const isNode = existsSync(join(dir, 'package.json')) || existsSync('package.json')
-  const isPython = ext === '.py' || existsSync(join(dir, 'pyproject.toml')) || existsSync('pyproject.toml')
-  const isGo = ext === '.go' || existsSync(join(dir, 'go.mod')) || existsSync('go.mod')
-  const isTS = ['.ts', '.tsx'].includes(ext)
+  const dir = dirName(absPath)
 
   const results: string[] = []
-
   try {
-    // TypeScript 类型检查
-    if (isTS && isNode) {
+    if (['.ts', '.tsx'].includes(ext)) {
       try {
-        execSync(`npx tsc --noEmit --skipLibCheck ${absPath}`, {
-          encoding: 'utf-8',
-          timeout: 10000,
-          cwd: dir,
-        })
-        results.push('✅ tsc: 无类型错误')
+        execSync(`npx tsc --noEmit --skipLibCheck ${absPath}`, { encoding: 'utf-8', timeout: 10000, cwd: dir })
       } catch (ex: any) {
-        const stderr = (ex.stderr || '').trim()
-        const stdout = (ex.stdout || '').trim()
-        const errOutput = stderr || stdout
-        if (errOutput) {
-          // 只取前 5 行错误
-          const errLines = errOutput.split('\n').slice(0, 5).join('\n')
-          results.push(`⚠️ tsc 错误:\n${errLines}`)
-        }
+        const err = (ex.stderr || ex.stdout || '').trim()
+        if (err) results.push(`⚠️ tsc:\n${err.split('\n').slice(0, 5).join('\n')}`)
       }
     }
-
-    // ESLint
-    if ((isTS || ext === '.js' || ext === '.jsx') && isNode) {
+    if (ext === '.py') {
       try {
-        const eslintPath = join(dir, 'node_modules', '.bin', 'eslint')
-        if (existsSync(eslintPath)) {
-          execSync(`npx eslint ${absPath} --format compact --no-error-on-unmatched-pattern 2>/dev/null`, {
-            encoding: 'utf-8',
-            timeout: 10000,
-            cwd: dir,
-          })
-          results.push('✅ eslint: 无错误')
-        }
+        execSync(`python3 -m py_compile ${absPath}`, { encoding: 'utf-8', timeout: 10000 })
       } catch (ex: any) {
-        const output = (ex.stdout || '').trim()
-        if (output && !output.includes('not found') && !output.includes('Cannot find')) {
-          const errLines = output.split('\n').slice(0, 5).join('\n')
-          results.push(`⚠️ eslint:\n${errLines}`)
-        }
+        const err = (ex.stderr || ex.stdout || '').trim()
+        if (err) results.push(`⚠️ py_compile:\n${err.split('\n').slice(0, 5).join('\n')}`)
       }
     }
+  } catch {}
 
-    // Python syntax check
-    if (isPython) {
-      try {
-        execSync(`python3 -m py_compile ${absPath}`, {
-          encoding: 'utf-8',
-          timeout: 10000,
-        })
-        results.push('✅ py_compile: 语法正确')
-      } catch (ex: any) {
-        const errOutput = (ex.stderr || ex.stdout || '').trim()
-        if (errOutput) {
-          const errLines = errOutput.split('\n').slice(0, 5).join('\n')
-          results.push(`⚠️ Python 语法错误:\n${errLines}`)
-        }
-      }
-    }
-
-    // Go vet
-    if (isGo) {
-      try {
-        execSync(`go vet ${absPath}`, {
-          encoding: 'utf-8',
-          timeout: 10000,
-        })
-        results.push('✅ go vet: 无问题')
-      } catch (ex: any) {
-        const errOutput = (ex.stderr || '').trim()
-        if (errOutput) {
-          const errLines = errOutput.split('\n').slice(0, 5).join('\n')
-          results.push(`⚠️ go vet:\n${errLines}`)
-        }
-      }
-    }
-  } catch {
-    // 验证过程出错不影响主流程
-  }
-
-  if (results.length === 0) {
-    return { hasErrors: false, output: '' }
-  }
-
-  const hasErrors = results.some(r => r.startsWith('⚠️'))
-  return { hasErrors, output: results.join('\n') }
+  return { hasErrors: results.some(r => r.startsWith('⚠️')), output: results.join('\n') }
 }
 
 // ─── 主循环 ───────────────────────────────────────────────────────────
@@ -494,6 +451,24 @@ export async function runQuery(
 
     // 非流式时回调文本
     if (!onToken && response.content) onText?.(response.content)
+
+    // ─── max_tokens 截断恢复（CC-inspired）────────────────────
+    // 模型输出被截断 → 升级 max_tokens 重试，或注入恢复消息
+    if (response.stopReason === 'max_tokens') {
+      const currentMax = config.maxTokens || 4096
+      if (currentMax < 64000) {
+        // 还没到上限，升级重试
+        config.maxTokens = Math.min(currentMax * 2, 64000)
+        onText?.(`\n⚠️ 输出被截断 (${currentMax} tokens)，升级到 ${config.maxTokens} 重试...\n`)
+        state.transition = { reason: 'next_turn', detail: `max_tokens 升级: ${currentMax} → ${config.maxTokens}` }
+        continue
+      } else {
+        // 到上限了，注入恢复消息
+        messages.push({ role: 'user', content: '你之前的回复被截断了。请从断点继续，不要重复已输出的内容。' })
+        state.transition = { reason: 'next_turn', detail: 'max_tokens 截断恢复' }
+        continue
+      }
+    }
 
     // ─── needsFollowUp 判断（CC-inspired）──────────────────────
     // 核心：模型有工具调用 → needsFollowUp=true → 循环继续

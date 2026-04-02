@@ -37,6 +37,14 @@ export function checkBudget(tracker: BudgetTracker, messages: Message[], budget:
   return { action: 'continue' }
 }
 export { COMPACT_PROMPT, buildCompactedMessages, shouldCompact, getCompactionRequest, autoCompactMessages } from './compact.js'
+export {
+  shouldExtractMemory,
+  extractSessionMemory,
+  loadSessionMemory,
+  manuallyExtractSessionMemory,
+  resetSessionMemoryState,
+  getSessionMemoryState,
+} from './sessionMemory.js'
 
 // Rough token estimation
 export function estimateTokens(text: string): number {
