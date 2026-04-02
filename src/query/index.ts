@@ -1,6 +1,8 @@
 // ─── Agent Loop 重构 ─────────────────────────────────────────────────────
-// 健壮的多轮循环：工具调用→结果→LLM 再思考→可能再调用工具
+// CC-inspired while(true) loop with State + transition tracking
 // 特性：
+//   - while(true) 循环，模型通过 needsFollowUp 控制退出
+//   - State 对象 + transition 记录（可观测、可调试）
 //   - 工具调用失败自动重试（最多 3 次，指数退避）
 //   - 循环调用检测（同一工具+相同参数连续 3 次 → 停止）
 //   - 最大工具调用轮数限制（默认 25，可配置）
@@ -36,6 +38,28 @@ const MAX_TOOL_ROUNDS = 25          // 最大工具调用轮数
 const MAX_RETRIES = 3               // 单次工具调用最大重试
 const LOOP_DETECTION_THRESHOLD = 3  // 连续相同调用次数阈值
 const EXPONENTIAL_BACKOFF_BASE = 1000 // 退避基础 ms
+
+// ─── State + Transition（CC-inspired）────────────────────────────────
+type TransitionReason =
+  | 'next_turn'                       // 正常：有工具调用，继续下一轮
+  | 'completed'                       // 正常退出：模型不再调用工具
+  | 'loop_detected'                   // 循环检测停止
+  | 'max_turns'                       // 达到最大轮数
+  | 'budget_exceeded'                 // Token 预算用尽
+  | 'model_error'                     // 模型调用失败
+  | 'reflection_retry'                // 反思后重试
+  | 'self_check'                      // 自我检查注入
+
+interface QueryState {
+  turn: number
+  messages: Message[]
+  toolUseBlocks: Array<{ id: string; name: string; args: Record<string, any> }>
+  needsFollowUp: boolean
+  transition: { reason: TransitionReason; detail?: string } | undefined
+  totalToolRounds: number
+  lastCallRecord: CallRecord | null
+  taskId: string | null
+}
 
 export interface QueryCallbacks {
   onText?: (text: string) => void
@@ -339,11 +363,23 @@ export async function runQuery(
     : toOpenAI(CORE_TOOLS)
 
   const budget = createBudgetTracker()
-  let lastCallRecord: CallRecord | null = null
-  let totalToolRounds = 0
-  let taskId: string | null = null
 
-  for (let turn = 1; turn <= MAX_TOOL_ROUNDS; turn++) {
+  // CC-inspired State tracking
+  const state: QueryState = {
+    turn: 0,
+    messages,
+    toolUseBlocks: [],
+    needsFollowUp: false,
+    transition: undefined,
+    totalToolRounds: 0,
+    lastCallRecord: null,
+    taskId: null,
+  }
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    state.turn++
+    const turn = state.turn
     onTurn?.(turn)
 
     // ─── 上下文管理 ───────────────────────────────────────────────
@@ -355,6 +391,7 @@ export async function runQuery(
     // Token 预算检查
     const decision = checkBudget(budget, messages)
     if (decision.action === 'stop') {
+      state.transition = { reason: 'budget_exceeded', detail: '上下文已满' }
       onError?.('上下文已满。请使用 /clear 清除历史或 /compact 压缩。')
       break
     }
@@ -387,6 +424,7 @@ export async function runQuery(
     try {
       response = await callLLM(messages, tools, config, onToken ? { onToken } : undefined)
     } catch (ex: unknown) {
+      state.transition = { reason: 'model_error', detail: ex instanceof Error ? ex.message : String(ex) }
       onError?.(ex instanceof Error ? ex.message : String(ex))
       break
     }
@@ -401,14 +439,26 @@ export async function runQuery(
     // 非流式时回调文本
     if (!onToken && response.content) onText?.(response.content)
 
-    // 没有工具调用 → 结束
-    if (!response.toolCalls?.length) {
+    // ─── needsFollowUp 判断（CC-inspired）──────────────────────
+    // 核心：模型有工具调用 → needsFollowUp=true → 循环继续
+    //       模型没有工具调用 → needsFollowUp=false → 准备退出
+    state.toolUseBlocks = response.toolCalls?.length
+      ? response.toolCalls.map(tc => ({
+          id: tc.id,
+          name: tc.function.name,
+          args: JSON.parse(tc.function.arguments || '{}'),
+        }))
+      : []
+
+    state.needsFollowUp = state.toolUseBlocks.length > 0
+
+    if (!state.needsFollowUp) {
       // 自我检查：如果之前有工具调用且没有做自我检查，做一次最终验证
-      if (totalToolRounds > 0 && !response.content?.includes('SELF_CHECK_PASS')) {
-        // 检查是否已经做过自我检查（上一条是 SELF_CHECK_PROMPT）
+      if (state.totalToolRounds > 0 && !response.content?.includes('SELF_CHECK_PASS')) {
         const lastMsg = messages[messages.length - 1]
         if (lastMsg?.content !== SELF_CHECK_PROMPT) {
           messages.push({ role: 'user', content: SELF_CHECK_PROMPT })
+          state.transition = { reason: 'self_check', detail: '注入自我检查' }
           continue
         }
       }
@@ -418,9 +468,11 @@ export async function runQuery(
       messages.push({ role: 'assistant', content: cleanContent })
 
       // 标记任务完成
-      if (taskId) {
-        updateTaskStatus(taskId, 'completed')
+      if (state.taskId) {
+        updateTaskStatus(state.taskId, 'completed')
       }
+
+      state.transition = { reason: 'completed', detail: `共 ${state.totalToolRounds} 轮工具调用` }
       break
     }
 
@@ -431,7 +483,7 @@ export async function runQuery(
     if (response.toolCalls.length === 1) {
       const tc = response.toolCalls[0]
       const args = JSON.parse(tc.function.arguments)
-      const newRecord = detectLoop(lastCallRecord, tc.function.name, args)
+      const newRecord = detectLoop(state.lastCallRecord, tc.function.name, args)
 
       if (newRecord.count >= LOOP_DETECTION_THRESHOLD) {
         const msg = `⚠️ 检测到循环调用：${tc.function.name} 已连续执行 ${newRecord.count} 次（相同参数）。已自动停止。`
@@ -446,28 +498,30 @@ export async function runQuery(
           role: 'user',
           content: '你刚才重复调用了相同的工具。请换一种方式解决问题，或者告诉用户当前状态。',
         })
-        lastCallRecord = null
+        state.lastCallRecord = null
+        state.transition = { reason: 'loop_detected', detail: `${tc.function.name} x${newRecord.count}` }
         continue
       }
-      lastCallRecord = newRecord
+      state.lastCallRecord = newRecord
     } else {
-      lastCallRecord = null
+      state.lastCallRecord = null
     }
 
     // ─── 并行工具执行 ─────────────────────────────────────────────
-    totalToolRounds++
-    if (totalToolRounds > MAX_TOOL_ROUNDS) {
+    state.totalToolRounds++
+    if (state.totalToolRounds > MAX_TOOL_ROUNDS) {
+      state.transition = { reason: 'max_turns', detail: `已达 ${MAX_TOOL_ROUNDS} 轮上限` }
       onError?.(`已达到最大工具调用轮数（${MAX_TOOL_ROUNDS}）。请使用 /compact 压缩后继续。`)
       break
     }
 
     // 创建任务记录（首次工具调用时）
     const sessionId = getWorkspaceSessionId()
-    if (!taskId && response.toolCalls.length > 0) {
+    if (!state.taskId && response.toolCalls.length > 0) {
       const planJson = JSON.stringify({ turn, toolCalls: response.toolCalls.map(tc => tc.function.name) })
-      taskId = createTask(sessionId, planJson, response.toolCalls.length)
-      if (taskId) {
-        updateTaskStatus(taskId, 'running')
+      state.taskId = createTask(sessionId, planJson, response.toolCalls.length)
+      if (state.taskId) {
+        updateTaskStatus(state.taskId, 'running')
       }
     }
 
@@ -598,9 +652,9 @@ export async function runQuery(
       }
 
       // 任务步进追踪
-      if (taskId) {
+      if (state.taskId) {
         const stepNum = toolResults.length + 1
-        addTaskStep(taskId, {
+        addTaskStep(state.taskId, {
           step: stepNum,
           tool: toolName,
           args: JSON.stringify(args).slice(0, 200),
@@ -608,7 +662,7 @@ export async function runQuery(
           status: result.isError ? 'failed' : 'completed',
           duration: 0,
         })
-        updateTaskStep(taskId, stepNum)
+        updateTaskStep(state.taskId, stepNum)
       }
 
       onToolResult?.(toolName, result)
@@ -648,9 +702,9 @@ export async function runQuery(
     }
 
     // 任务完成/失败时更新状态
-    if (taskId) {
+    if (state.taskId) {
       if (hasErrors) {
-        updateTaskStatus(taskId, 'failed', toolResults.find(r => r.result.isError)?.result.content.slice(0, 200))
+        updateTaskStatus(state.taskId, 'failed', toolResults.find(r => r.result.isError)?.result.content.slice(0, 200))
       }
     }
 
@@ -667,12 +721,21 @@ export async function runQuery(
             config.model = downgraded
             onText?.(`\n📉 模型已降级到: ${downgraded}\n`)
           } else {
+            state.transition = { reason: 'budget_exceeded', detail: '预算用尽且无降级模型' }
             onError?.('预算已用尽且无可用降级模型。请增加预算或明天再试。')
             break
           }
         }
       }
     }
+
+    // 下一轮
+    state.transition = { reason: 'next_turn', detail: `${toolResults.length} 个工具结果` }
+  } // while (true)
+
+  // 输出 transition 日志（调试用）
+  if (state.transition) {
+    onText?.(`\n[loop] 退出原因: ${state.transition.reason}${state.transition.detail ? ` — ${state.transition.detail}` : ''}\n`)
   }
 
   // 保存会话到 SQLite
