@@ -21,6 +21,7 @@ import { createBudgetTracker, checkBudget } from '../memory/index.js'
 import { shouldFlushMemory, buildFlushMessages } from '../memory/flush.js'
 import { shouldExtractMemory, extractSessionMemory, loadSessionMemory } from '../memory/sessionMemory.js'
 import { shouldExtractGlobalMemories, extractGlobalMemories, loadGlobalMemories } from '../memory/extractMemories.js'
+import { shouldConsolidate, consolidateMemory, recordSession } from '../memory/dream.js'
 import { shouldCompact, autoCompactMessages, COMPACT_PROMPT, runCompactionPipeline } from '../memory/compact.js'
 import { checkPermission } from '../permissions/index.js'
 import { collectContext, formatContextForPrompt } from '../context/index.js'
@@ -543,6 +544,16 @@ export async function runQuery(
         extractGlobalMemories(messages, async (msgs) => {
           const resp = await callLLM(msgs, [], config)
           return resp.content
+        }).catch(() => {})  // 静默失败
+      }
+
+      // Auto-Dream 后台记忆整理（CC autoDream 风格，fire-and-forget）
+      recordSession()  // 记录会话
+      if (shouldConsolidate()) {
+        consolidateMemory().then(result => {
+          if (result.success) {
+            console.log(`[auto-dream] ${result.summary}`)
+          }
         }).catch(() => {})  // 静默失败
       }
 
