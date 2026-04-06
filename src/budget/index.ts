@@ -1,7 +1,8 @@
 // ─── 成本控制增强 ────────────────────────────────────────────────────────
 // 每日/每周/每月预算限制、超预算降级模型、/budget 命令
+// 会话级实时统计、工具时长、API 时长、缓存命中（CC-inspired）
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { estimateCost, type TokenUsage, getUsageTracker, formatUsd, MODEL_PRICING } from '../config/index.js'
@@ -37,8 +38,135 @@ export interface CostRecord {
   model: string
   inputTokens: number
   outputTokens: number
+  cacheReadTokens?: number
+  cacheCreationTokens?: number
   cost: number
   category: 'chat' | 'tool' | 'plan'
+  apiDurationMs?: number      // API 调用时长（网络延迟）
+}
+
+// ─── 会话级实时统计（CC-inspired）──────────────────────────────────────
+export interface SessionStats {
+  // Token 统计
+  totalInputTokens: number
+  totalOutputTokens: number
+  totalCacheReadTokens: number
+  totalCacheCreationTokens: number
+
+  // 花费
+  totalCostUSD: number
+
+  // 时长
+  totalAPIDurationMs: number      // 所有 API 调用的网络时长
+  totalToolDurationMs: number     // 所有工具调用的执行时长
+  totalSessionDurationMs: number  // 会话总时长
+
+  // 计数
+  apiCallCount: number
+  toolCallCount: number
+  errorCount: number
+
+  // 按模型统计
+  modelUsage: Record<string, {
+    inputTokens: number
+    outputTokens: number
+    cost: number
+    callCount: number
+  }>
+
+  // 最后更新时间
+  lastUpdated: number
+}
+
+// 会话级状态（内存中，不持久化）
+let sessionStats: SessionStats = createEmptySessionStats()
+
+function createEmptySessionStats(): SessionStats {
+  return {
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCacheReadTokens: 0,
+    totalCacheCreationTokens: 0,
+    totalCostUSD: 0,
+    totalAPIDurationMs: 0,
+    totalToolDurationMs: 0,
+    totalSessionDurationMs: 0,
+    apiCallCount: 0,
+    toolCallCount: 0,
+    errorCount: 0,
+    modelUsage: {},
+    lastUpdated: Date.now(),
+  }
+}
+
+export function getSessionStats(): SessionStats {
+  return { ...sessionStats, modelUsage: { ...sessionStats.modelUsage } }
+}
+
+export function resetSessionStats(): void {
+  sessionStats = createEmptySessionStats()
+}
+
+// 记录 API 调用（每轮对话）
+export function recordAPICall(
+  usage: TokenUsage,
+  model: string,
+  apiDurationMs: number,
+  category: 'chat' | 'tool' | 'plan' = 'chat'
+): number {
+  const cost = estimateCost(usage, model)
+
+  // 更新会话统计
+  sessionStats.totalInputTokens += usage.input_tokens || 0
+  sessionStats.totalOutputTokens += usage.output_tokens || 0
+  sessionStats.totalCacheReadTokens += usage.cache_read_input_tokens || 0
+  sessionStats.totalCacheCreationTokens += usage.cache_creation_input_tokens || 0
+  sessionStats.totalCostUSD += cost
+  sessionStats.totalAPIDurationMs += apiDurationMs
+  sessionStats.apiCallCount++
+  sessionStats.lastUpdated = Date.now()
+
+  // 按模型统计
+  if (!sessionStats.modelUsage[model]) {
+    sessionStats.modelUsage[model] = { inputTokens: 0, outputTokens: 0, cost: 0, callCount: 0 }
+  }
+  sessionStats.modelUsage[model].inputTokens += usage.input_tokens || 0
+  sessionStats.modelUsage[model].outputTokens += usage.output_tokens || 0
+  sessionStats.modelUsage[model].cost += cost
+  sessionStats.modelUsage[model].callCount++
+
+  // 持久化到 JSONL
+  const record: CostRecord = {
+    timestamp: Date.now(),
+    model,
+    inputTokens: usage.input_tokens || 0,
+    outputTokens: usage.output_tokens || 0,
+    cacheReadTokens: usage.cache_read_input_tokens || 0,
+    cacheCreationTokens: usage.cache_creation_input_tokens || 0,
+    cost,
+    category,
+    apiDurationMs,
+  }
+  appendCostRecord(record)
+
+  return cost
+}
+
+// 记录工具调用时长
+export function recordToolCall(durationMs: number): void {
+  sessionStats.totalToolDurationMs += durationMs
+  sessionStats.toolCallCount++
+  sessionStats.lastUpdated = Date.now()
+}
+
+// 记录错误
+export function recordError(): void {
+  sessionStats.errorCount++
+}
+
+// 更新会话总时长
+export function updateSessionDuration(startedAt: number): void {
+  sessionStats.totalSessionDurationMs = Date.now() - startedAt
 }
 
 // ─── 持久化 ──────────────────────────────────────────────────────────
@@ -48,6 +176,13 @@ const COST_FILE = join(DIR, 'costs.jsonl')
 
 function ensureDir() {
   mkdirSync(DIR, { recursive: true })
+}
+
+function appendCostRecord(record: CostRecord): void {
+  ensureDir()
+  try {
+    appendFileSync(COST_FILE, JSON.stringify(record) + '\n')
+  } catch {}
 }
 
 export function loadBudget(): BudgetLimit {
@@ -102,7 +237,6 @@ export function recordCost(usage: TokenUsage, model: string, category: 'chat' | 
   // 追加到 JSONL 文件
   ensureDir()
   try {
-    const { appendFileSync } = require('fs')
     appendFileSync(COST_FILE, JSON.stringify(record) + '\n')
   } catch {}
 
@@ -294,6 +428,21 @@ export function getCostReport(days: number = 30): CostReport {
 }
 
 // ─── 格式化 ──────────────────────────────────────────────────────────
+
+// 格式化时长（CC 风格）
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  const min = Math.floor(ms / 60000)
+  const sec = Math.floor((ms % 60000) / 1000)
+  return `${min}m ${sec}s`
+}
+
+// 格式化数字（千分位）
+function formatNumber(n: number): string {
+  return n.toLocaleString('en-US')
+}
+
 export function formatBudgetStatus(): string {
   const budget = loadBudget()
   const usage = getCostUsage()
@@ -330,6 +479,58 @@ export function formatBudgetStatus(): string {
   lines.push('')
   lines.push('设置预算: /budget set <daily|weekly|monthly> <amount>')
   lines.push('查看报告: /budget report')
+
+  return lines.join('\n')
+}
+
+// ─── 会话统计格式化（CC cost 命令风格）─────────────────────────────────
+export function formatSessionStats(): string {
+  const stats = getSessionStats()
+  const lines: string[] = []
+
+  lines.push('📊 会话统计')
+  lines.push('─'.repeat(40))
+
+  // Token 使用
+  lines.push(`  Input tokens:     ${formatNumber(stats.totalInputTokens)}`)
+  lines.push(`  Output tokens:    ${formatNumber(stats.totalOutputTokens)}`)
+  if (stats.totalCacheReadTokens > 0) {
+    lines.push(`  Cache read:       ${formatNumber(stats.totalCacheReadTokens)}`)
+  }
+  if (stats.totalCacheCreationTokens > 0) {
+    lines.push(`  Cache creation:   ${formatNumber(stats.totalCacheCreationTokens)}`)
+  }
+
+  lines.push('')
+
+  // 花费
+  lines.push(`  Total cost:       ${formatUsd(stats.totalCostUSD)}`)
+
+  // 时长
+  lines.push(`  API duration:     ${formatDuration(stats.totalAPIDurationMs)}`)
+  lines.push(`  Tool duration:    ${formatDuration(stats.totalToolDurationMs)}`)
+  lines.push(`  Session duration: ${formatDuration(stats.totalSessionDurationMs)}`)
+
+  lines.push('')
+
+  // 计数
+  lines.push(`  API calls:        ${stats.apiCallCount}`)
+  lines.push(`  Tool calls:       ${stats.toolCallCount}`)
+  if (stats.errorCount > 0) {
+    lines.push(`  Errors:           ${stats.errorCount}`)
+  }
+
+  // 按模型
+  const models = Object.entries(stats.modelUsage)
+  if (models.length > 0) {
+    lines.push('')
+    lines.push('  By model:')
+    for (const [model, usage] of models.sort((a, b) => b[1].cost - a[1].cost)) {
+      lines.push(`    ${model}:`)
+      lines.push(`      ${formatNumber(usage.inputTokens)} in / ${formatNumber(usage.outputTokens)} out`)
+      lines.push(`      ${formatUsd(usage.cost)} (${usage.callCount} calls)`)
+    }
+  }
 
   return lines.join('\n')
 }
