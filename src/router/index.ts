@@ -31,14 +31,77 @@ const DEFAULT_ROUTES: ModelRoute = {
   default: 'gpt-4o-mini',
 }
 
-// ─── 任务分类关键词 ───────────────────────────────────────────────────
+// ─── 任务分类关键词（增强版）────────────────────────────────────────────
+// 按语义和工具调用模式分类，更精确
 const CATEGORY_KEYWORDS: Record<TaskCategory, string[]> = {
-  plan: ['plan', '规划', '步骤', '架构', '设计', '方案', '重构'],
-  edit: ['edit', '修改', '改', '修复', 'fix', 'update', 'update file', 'write_file', 'edit_file', 'patch_file'],
-  search: ['search', 'find', '查找', '搜索', 'grep', 'glob', '哪里'],
-  chat: ['what', 'how', 'why', '是什么', '怎么', '为什么', 'explain', '解释'],
-  code: ['code', '写', '实现', 'implement', 'create', 'build', '函数'],
+  plan: [
+    'plan', '规划', '步骤', '架构', '设计', '方案', '重构',
+    '结构', '组织', '流程', '策略', '计划', 'roadmap', 'todo',
+    '怎么开始', '第一步', '第二步', '第三步', '分解', '拆分'
+  ],
+  edit: [
+    'edit', '修改', '改', '修复', 'fix', 'update', 'update file',
+    'write_file', 'edit_file', 'patch_file', 'change', '更改', '调整',
+    'replace', '替换', '重写', 'rewrite', 'refactor', '重构',
+    'optimize', '优化', '改进', 'better', 'fix bug', 'bug fix'
+  ],
+  search: [
+    'search', 'find', '查找', '搜索', 'grep', 'glob', '哪里',
+    'what is', 'where', 'which', '如何', '怎样', '方法', 'solution',
+    '原因', '问题', 'debug', '错误', 'log', 'trace', '定位'
+  ],
+  chat: [
+    'what', 'how', 'why', '是什么', '怎么', '为什么', 'explain', '解释',
+    '说明', '介绍', '讲讲', '说说', '理解', '明白', '懂吗',
+    'help', 'assist', 'support', 'tell me', 'describe', 'summary'
+  ],
+  code: [
+    'code', '写', '实现', 'implement', 'create', 'build', '函数',
+    'function', 'class', 'method', 'variable', '参数', '返回值',
+    '语法', '报错', '编译', '运行', '测试', 'unit test',
+    'import', 'export', 'require', 'module', 'package', '依赖'
+  ],
   default: [],
+}
+
+// ─── 工具调用权重（用于分类决策）───────────────────────────────────────
+// 不同工具的权重，影响分类结果
+const TOOL_WEIGHTS: Record<string, TaskCategory> = {
+  'write_file': 'edit',
+  'edit_file': 'edit',
+  'patch_file': 'edit',
+  'bash': 'code',
+  'test_runner': 'code',
+  'read_file': 'search',
+  'grep': 'search',
+  'glob': 'search',
+  'web_search': 'search',
+  'fetch': 'search',
+  'plan': 'plan',
+  'todo': 'plan',
+  'task': 'plan',
+}
+
+// ─── 复杂度评分（0-10，用于选择模型）───────────────────────────────────
+function calculateComplexityScore(message: string, toolCalls?: string[]): number {
+  let score = 0
+
+  // 消息长度
+  if (message.length > 200) score += 1
+  if (message.length > 500) score += 2
+
+  // 关键词复杂度
+  const complexWords = ['架构', '设计', '重构', 'optimize', 'performance', 'security', 'algorithm']
+  for (const word of complexWords) {
+    if (message.includes(word)) score += 2
+  }
+
+  // 工具调用数量
+  if (toolCalls) {
+    score += Math.min(toolCalls.length * 1.5, 4)
+  }
+
+  return Math.min(score, 10)
 }
 
 // ─── 路由逻辑 ─────────────────────────────────────────────────────────
@@ -87,37 +150,80 @@ export function setRouterConfig(cfg: Partial<RouterConfig>): void {
 export function classifyTask(userMessage: string, toolCalls?: string[]): TaskCategory {
   const msg = userMessage.toLowerCase()
 
-  // 根据工具调用分类
+  // 根据工具调用分类（高优先级）
   if (toolCalls) {
-    if (toolCalls.some(t => t === 'write_file' || t === 'edit_file' || t === 'patch_file')) {
-      return 'edit'
-    }
-    if (toolCalls.some(t => t === 'grep' || t === 'glob' || t === 'read_file')) {
-      return 'search'
-    }
-    if (toolCalls.some(t => t === 'bash')) {
-      return 'code'
+    for (const tool of toolCalls) {
+      if (TOOL_WEIGHTS[tool]) {
+        return TOOL_WEIGHTS[tool]
+      }
     }
   }
 
   // 根据消息内容分类
+  const scores: Record<TaskCategory, number> = {
+    plan: 0,
+    edit: 0,
+    search: 0,
+    chat: 0,
+    code: 0,
+    default: 0,
+  }
+
   for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
-    if (keywords.some(kw => msg.includes(kw))) {
-      return category as TaskCategory
+    const cat = category as TaskCategory
+    for (const kw of keywords) {
+      if (msg.includes(kw.toLowerCase())) {
+        scores[cat]++
+      }
     }
   }
 
-  return 'default'
+  // 返回得分最高的类别
+  let maxScore = 0
+  let bestCategory: TaskCategory = 'default'
+
+  for (const [category, score] of Object.entries(scores)) {
+    const cat = category as TaskCategory
+    if (score > maxScore || (score === maxScore && cat === 'chat')) {
+      maxScore = score
+      bestCategory = cat
+    }
+  }
+
+  return bestCategory
 }
 
-export function routeModel(userMessage: string, toolCalls?: string[]): string | null {
+export function routeModel(userMessage: string, toolCalls?: string[], complexityScore?: number): string | null {
   const cfg = getRouterConfig()
   if (!cfg.enabled) return null
 
   const category = classifyTask(userMessage, toolCalls)
-  const model = cfg.routes[category] || cfg.fallbackModel
+  let model = cfg.routes[category] || cfg.fallbackModel
 
   if (!model) return null
+
+  // 复杂度自适应（如果启用了）
+  if (complexityScore !== undefined && complexityScore >= 7) {
+    // 高复杂度任务使用更强的模型
+    switch (category) {
+      case 'plan':
+        model = 'claude-sonnet-4-20250514'
+        break
+      case 'edit':
+        model = 'claude-3-7-sonnet-20250219'
+        break
+      case 'code':
+        model = 'claude-3-7-sonnet-20250219'
+        break
+      case 'search':
+        model = 'gpt-4o'
+        break
+      case 'chat':
+        model = 'gpt-4o'
+        break
+    }
+  }
+
   return model
 }
 
