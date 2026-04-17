@@ -1,0 +1,37 @@
+#!/usr/bin/env node
+
+const MirofishDevTool = require('../mirofish-product.js');
+const program = require('commander');
+
+const tool = new MirofishDevTool();
+
+program
+  .name('mirofish')
+  .description('Mirofish风格的高效开发工具')
+  .version('1.0.0');
+
+program
+  .command('generate <type> <name>')
+  .description('快速生成项目模板')
+  .action((type, name) => {
+    const template = tool.generateProject(type, name);
+    console.log(`生成 ${type} 项目: ${name}`);
+    console.log(template.description);
+    template.files.forEach(file => console.log(`  - ${file}`));
+  });
+
+program
+  .command('analyze <file>')
+  .description('分析代码质量')
+  .action((file) => {
+    try {
+      const stats = tool.analyzeCode(file);
+      console.log(`代码统计:`, stats);
+      const suggestions = tool.optimizeSuggestions(file);
+      console.log('优化建议:', suggestions);
+    } catch (error) {
+      console.error('分析失败:', error.message);
+    }
+  });
+
+program.parse(process.argv);
